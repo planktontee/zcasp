@@ -1,0 +1,18 @@
+.{
+    .name = .zcasp,
+    .version = "0.0.1",
+    .dependencies = .{
+        .regent = .{
+            .url = "git+https://github.com/planktontee/regent/#7f8925233a23405a9529416e6dadee1c5fd7c953",
+            .hash = "regent-0.0.1-zgdbw-cuAAAqyrK_MdAT1upi5_SvkOAJuE4L7ctd4xyn",
+        },
+    },
+    .minimum_zig_version = "0.15.2",
+    .paths = .{
+        "build.zig",
+        "build.zig.zon",
+        "zcasp",
+        "zcasp.zig",
+    },
+    .fingerprint = 0x41d1ad80d8fc8688,
+}
