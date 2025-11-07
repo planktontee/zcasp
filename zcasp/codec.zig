@@ -7,6 +7,7 @@ const AtDepthArrayTokenizer = argIter.AtDepthArrayTokenizer;
 const TstArgCursor = argIter.TstArgCursor;
 
 pub const range = @import("extra/range.zig");
+pub const byteUnit = @import("extra/byteUnit.zig");
 
 pub fn ensureTypeTag(comptime T: type, comptime tag: @Type(.enum_literal)) void {
     comptime if (@typeInfo(T) != tag) @compileError(std.fmt.comptimePrint(
@@ -761,6 +762,7 @@ test "codec parseFlag" {
 
 test {
     comptime {
-        _ = @import("extra/range.zig");
+        _ = range;
+        _ = byteUnit;
     }
 }
