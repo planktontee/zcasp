@@ -261,12 +261,14 @@ pub const AtDepthArrayTokenizer = struct {
                     return slice;
                 },
                 .post1dValue => {
-                    if (try self.skipWhiteEspaceCheckEnd()) return null;
-
+                    if (self.cursor >= self.input.len) return null;
                     switch (try self.expectPeek()) {
                         ',' => {
                             self.cursor += 1;
-                            _ = try self.skipWhiteSpaceExpectByte();
+                            _ = try self.skipWhiteSpace();
+                            if (self.cursor >= self.input.len) return null;
+
+                            _ = try self.expectPeek();
                             self.valueStart = self.cursor;
                             self.state = .phantom1dArray;
                             continue :stateLoop;
