@@ -458,7 +458,6 @@ test "Depth 1 Array tokenizer (non-string)" {
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "[1, "));
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "\t[1,"));
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "[1,\t"));
-    try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "1,"));
 
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1,]"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1, ]"));
@@ -527,6 +526,7 @@ test "Depth 1 Array tokenizer (non-string)" {
     try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "1"));
     try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, " 1 "));
     try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "\t1\t"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "1,"));
 
     const expectTwo: []const []const u8 = &.{ "1", "1" };
     try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "[1,1]"));

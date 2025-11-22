@@ -193,7 +193,18 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
 
         pub fn formatDefaultValue(comptime T: type, comptime defaultValue: T) []const u8 {
             return comptime switch (@typeInfo(T)) {
-                .comptime_int, .int, .comptime_float, .float => std.fmt.comptimePrint(
+                .int,
+                => if (T == u8)
+                    std.fmt.comptimePrint(
+                        "{c}",
+                        .{defaultValue},
+                    )
+                else
+                    std.fmt.comptimePrint(
+                        "{d}",
+                        .{defaultValue},
+                    ),
+                .comptime_int, .comptime_float, .float => std.fmt.comptimePrint(
                     "{d}",
                     .{defaultValue},
                 ),
@@ -256,7 +267,12 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                 var b = coll.ComptSb.init("");
                 var Tt = T;
                 rfd: switch (@typeInfo(Tt)) {
-                    .int => b.append("int"),
+                    .int => {
+                        if (Tt == u8)
+                            b.append("char")
+                        else
+                            b.append("int");
+                    },
                     .float => b.append("float"),
                     .array => |arr| {
                         Tt = arr.child;
