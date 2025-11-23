@@ -191,13 +191,25 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             };
         }
 
+        pub fn translateChar(comptime defaultValue: u8) []const u8 {
+            return comptime switch (defaultValue) {
+                '\n' => "\\n",
+                '\t' => "\\t",
+                0...8,
+                11...32,
+                127...255,
+                => std.fmt.comptimePrint("0x{X:0>2}", .{defaultValue}),
+                33...126 => &.{defaultValue},
+            };
+        }
+
         pub fn formatDefaultValue(comptime T: type, comptime defaultValue: T) []const u8 {
             return comptime switch (@typeInfo(T)) {
                 .int,
                 => if (T == u8)
                     std.fmt.comptimePrint(
-                        "{c}",
-                        .{defaultValue},
+                        "'{s}'",
+                        .{translateChar(defaultValue)},
                     )
                 else
                     std.fmt.comptimePrint(
@@ -256,7 +268,8 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                             "Short defined with no default value",
                         ),
                     );
-                    if (std.mem.eql(u8, field.name, tag)) break :rt coll.ComptSb.initTup(.{ "-", shortField.name }).s;
+                    if (std.mem.eql(u8, field.name, tag))
+                        break :rt coll.ComptSb.initTup(.{ "-", shortField.name }).s;
                 }
                 break :rt null;
             };
