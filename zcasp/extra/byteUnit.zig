@@ -113,7 +113,7 @@ pub fn parse(value: []const u8) Error!ByteUnit {
             },
             .unitEnd,
             => {
-                if (i != value.len - 1) return Error.UnitSyntaxError;
+                if (i < value.len - 1) return Error.UnitSyntaxError;
                 if (i >= value.len) {
                     return .{
                         .count = try std.fmt.parseInt(
