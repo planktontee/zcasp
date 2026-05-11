@@ -2,3 +2,5 @@ zig-out
 allgirs
 .zig-cache
 zcasp.zip
+zig-pkg
+.vscode
