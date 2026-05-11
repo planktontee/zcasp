@@ -19,6 +19,7 @@ const TstArgCursor = argIter.TstArgCursor;
 const PrimitiveCodec = argCodec.PrimitiveCodec;
 const ArgCodec = argCodec.ArgCodec;
 const Result = regent.result.Result;
+const Union = regent.meta.Union;
 
 // NOTE: This ties spec positionals default and helper's
 pub fn defaultPositionals() type {
@@ -52,15 +53,12 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                     .alignment = @alignOf(newSpecR),
                 };
             }
-            const newUni: std.builtin.Type = .{
-                .@"union" = .{
-                    .layout = VerbUnion.layout,
-                    .tag_type = VerbUnion.tag_type,
-                    .fields = &newUnionFields,
-                    .decls = VerbUnion.decls,
-                },
-            };
-            return @Type(newUni);
+            return Union(.{
+                .layout = VerbUnion.layout,
+                .tag_type = VerbUnion.tag_type,
+                .fields = &newUnionFields,
+                .decls = VerbUnion.decls,
+            });
         }
 
         fn SpecVerbsErrors() type {
@@ -83,6 +81,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
             });
         };
         const SpecEnumFields = std.meta.FieldEnum(Spec);
+        const ShortEnum = std.meta.FieldEnum(@TypeOf(Spec.Short));
 
         pub const Error = E: {
             var errors = error{
@@ -151,8 +150,8 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
             };
         }
 
-        pub fn parseArgs(self: *@This()) ?ParseError {
-            var iter = std.process.args();
+        pub fn parseArgs(self: *@This(), args: std.process.Args) ?ParseError {
+            var iter = args.iterate();
             const cursor = rv: {
                 var c: CursorT = .{
                     .curr = null,
@@ -219,6 +218,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                 } else if (arg.len == 0) {
                     continue;
                 } else {
+                    @branchHint(.likely);
                     var offset: usize = 1;
                     if (arg[1] == '-') offset += 1;
                     self.namedToken(offset, arg, cursor) catch |e| return .ErrOf(e, cursor);
@@ -293,7 +293,28 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                         var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                         c.lastOpt = slice;
                     }
-                    break :rv self.namedArg(slice, cursor);
+
+                    inline for (std.meta.fields(Spec)) |field| {
+                        if (std.mem.eql(u8, field.name, slice)) {
+                            break :rv self.namedArg(slice, cursor);
+                        }
+                    }
+
+                    inline for (std.meta.fields(Spec)) |field| {
+                        if (std.mem.startsWith(u8, slice, field.name)) {
+                            if (slice.len > field.name.len) {
+                                if (splitValue != null) return Error.UnknownArgumentName;
+
+                                cursor.stackItem(slice[field.name.len..]);
+                                try self.namedArg(slice[0..field.name.len], cursor);
+                                if (cursor.curr != null) return Error.UnknownArgumentName;
+                                break :rv {};
+                            }
+                            return Error.UnknownArgumentName;
+                        }
+                    }
+
+                    return Error.UnknownArgumentName;
                 },
                 1 => self.shortArg(slice, cursor),
                 else => Error.InvalidArgumentToken,
@@ -306,7 +327,30 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
             }
         }
 
+        fn matchShortArg(arg: []const u8, start: usize) ?[]const u8 {
+            if (std.meta.stringToEnum(ShortEnum, arg[start .. start + 2])) |tagE| {
+                return @tagName(tagE);
+            } else if (std.meta.stringToEnum(ShortEnum, arg[start .. start + 1])) |tagE| {
+                return @tagName(tagE);
+            }
+
+            return null;
+        }
+
+        fn translateShortArg(arg: []const u8) Error![]const u8 {
+            const ShortFields = comptime std.meta.fields(@TypeOf(Spec.Short));
+
+            inline for (ShortFields) |shortField| {
+                if (std.mem.eql(u8, shortField.name, arg)) {
+                    return @tagName(@field(Spec.Short, shortField.name));
+                }
+            }
+
+            return Error.UnknownShorthandName;
+        }
+
         fn shortArg(self: *@This(), arg: []const u8, cursor: *CursorT) Error!void {
+            // return Error.UnknownShorthandName;
             if (comptime !@hasDecl(Spec, "Short")) return Error.MissingShorthandMetadata;
             // NOTE: Short will result in fields[] with the enum_literal undone
             // with enum_literal as a key, unfortunately there's no enforcement for it to be
@@ -314,37 +358,116 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
             const ShortFields = comptime std.meta.fields(@TypeOf(Spec.Short));
             if (comptime ShortFields.len == 0) return Error.UnknownArgumentName;
 
-            var start: usize = 0;
-            var end: usize = @min(2, arg.len);
-            var noneCursor = coll.UnitCursor([]const u8).asNoneCursor();
-            while (end <= arg.len) {
-                ret: inline for (ShortFields) |s| {
-                    const short = arg[start..end];
-                    if (std.mem.eql(u8, s.name, short)) {
-                        const tag = @tagName(s.defaultValue() orelse return Error.MissingShorthandLink);
-                        if (comptime withDiag) {
-                            var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
-                            c.lastOpt = short;
-                        }
-                        try self.namedArg(
-                            tag,
-                            if (end == arg.len) cursor else &noneCursor,
-                        );
-                        start = end;
-                        break :ret;
-                    }
-                } else if (end - start == 1) {
-                    return Error.UnknownShorthandName;
-                }
+            const ShortArg = struct {
+                start: usize,
+                end: usize,
+                arg: []const u8,
+            };
 
-                if (start == end and end == arg.len) {
-                    return;
-                } else if (end - start == 0) {
-                    end = @min(end + 2, arg.len);
+            var start: usize = 0;
+
+            var lastArg: ShortArg = undefined;
+            var nextArg: ShortArg = lastArg;
+
+            var unitCursor = coll.UnitCursor([]const u8).asNoneCursor();
+
+            // handling up to len < 2
+            while (arg.len - start >= 2) {
+                const optShortArg = matchShortArg(arg, start);
+
+                if (start == 0) {
+                    if (optShortArg == null) return Error.UnknownShorthandName;
+
+                    nextArg = .{
+                        .start = start,
+                        .end = start + optShortArg.?.len,
+                        .arg = try translateShortArg(optShortArg.?),
+                    };
+                    start += optShortArg.?.len;
+
+                    lastArg = nextArg;
                 } else {
-                    end -= 1;
+                    if (optShortArg == null) {
+                        start += 1;
+                        continue;
+                    }
+
+                    nextArg = .{
+                        .start = start,
+                        .end = start + optShortArg.?.len,
+                        .arg = try translateShortArg(optShortArg.?),
+                    };
+                    start += optShortArg.?.len;
+
+                    if (comptime withDiag) {
+                        var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
+                        c.lastOpt = lastArg.arg;
+                    }
+
+                    if (lastArg.end != nextArg.start) unitCursor.stackItem(arg[lastArg.end..nextArg.start]);
+                    try self.namedArg(
+                        lastArg.arg,
+                        &unitCursor,
+                    );
+                    if (unitCursor.curr != null) return Error.UnknownShorthandName;
+
+                    lastArg = nextArg;
                 }
             }
+
+            // 1 length tail
+            if (arg.len - start > 0) {
+                if (std.meta.stringToEnum(ShortEnum, arg[start .. start + 1])) |tagE| {
+                    const shArg = @tagName(tagE);
+                    nextArg = .{
+                        .start = start,
+                        .end = start + 1,
+                        .arg = try translateShortArg(shArg),
+                    };
+
+                    if (start > 0) {
+                        if (comptime withDiag) {
+                            var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
+                            c.lastOpt = lastArg.arg;
+                        }
+                        if (lastArg.end != nextArg.start) unitCursor.stackItem(arg[lastArg.end..nextArg.start]);
+                        try self.namedArg(
+                            lastArg.arg,
+                            &unitCursor,
+                        );
+                        if (unitCursor.curr != null) return Error.UnknownShorthandName;
+                    }
+
+                    lastArg = nextArg;
+                    start += 1;
+                } else if (start > 0)
+                    start += 1
+                else
+                    return Error.UnknownShorthandName;
+            }
+
+            // last lastArg set pass
+            if (start > 0) {
+                if (comptime withDiag) {
+                    var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
+                    c.lastOpt = lastArg.arg;
+                }
+
+                var pickCursor = cursor;
+                if (lastArg.end != arg.len) {
+                    unitCursor.stackItem(arg[lastArg.end..arg.len]);
+                    pickCursor = &unitCursor;
+                }
+                if (unitCursor.peek() != null and cursor.curr != null) return Error.UnknownShorthandName;
+
+                try self.namedArg(
+                    lastArg.arg,
+                    pickCursor,
+                );
+                return;
+            }
+
+            return Error.UnknownShorthandName;
         }
 
         fn namedArg(self: *@This(), arg: []const u8, cursor: *CursorT) Error!void {
@@ -385,15 +508,17 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
     };
 }
 
-pub fn tstParseSpec(allocator: Allocator, cursor: *coll.Cursor([]const u8), Spec: type) !SpecResponse(Spec) {
-    var response = SpecResponse(Spec).init(allocator);
+pub fn tstParseSpec(allocator: Allocator, cursor: *coll.Cursor([]const u8), Spec: type) !SpecResponseWithConfig(Spec, {}, true) {
+    var response = SpecResponseWithConfig(Spec, {}, true).init(allocator);
     if (response.parse(cursor)) |err| {
-        return @as(@TypeOf(response).Error!@TypeOf(response), err.err);
+        // std.debug.print("Last opt <{?s}>, Last token <{?s}>. ", .{ err.lastOpt, err.lastToken });
+        // std.debug.print("{s}\n", .{err.message orelse @errorName(err.err)});
+        return err.err;
     }
     return response;
 }
 
-fn tstParse(allocator: Allocator, data: [:0]const u8, Spec: type) !SpecResponse(Spec) {
+fn tstParse(allocator: Allocator, data: [:0]const u8, Spec: type) !SpecResponseWithConfig(Spec, {}, true) {
     var tstCursor = try TstArgCursor.init(&allocator, data);
     var cursor = tstCursor.asCursor();
     return try tstParseSpec(allocator, &cursor, Spec);
@@ -449,7 +574,7 @@ test "parsed chained flags" {
 
     const Spec = struct {
         t1: bool = undefined,
-        t2: bool = undefined,
+        t2: bool = false,
         t3: bool = undefined,
         t4: bool = undefined,
         t5: bool = undefined,
@@ -468,6 +593,32 @@ test "parsed chained flags" {
     try std.testing.expect(r1.options.t3);
     try std.testing.expect(r1.options.t4);
     try std.testing.expect(!r1.options.t5);
+}
+
+test "parsed glued arg/param chain" {
+    const base = &std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base.*);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const Spec = struct {
+        mem: usize = undefined,
+        str: []const u8 = undefined,
+        count: usize = undefined,
+        bth: usize = undefined,
+
+        pub const Short = .{
+            .m = .mem,
+            .s = .str,
+            .c = .count,
+            .b = .bth,
+        };
+    };
+    const r1 = try tstParse(allocator, "program -m512sHelloc5b=3", Spec);
+    try std.testing.expectEqual(512, r1.options.mem);
+    try std.testing.expectEqualStrings("Hello", r1.options.str);
+    try std.testing.expectEqual(5, r1.options.count);
+    try std.testing.expectEqual(3, r1.options.bth);
 }
 
 test "parse short arg" {
@@ -609,6 +760,20 @@ test "parse kvargs" {
 
     try std.testing.expectEqual(true, r1.options.something);
     try std.testing.expectEqual(true, r1.options.@"super-something");
+}
+
+test "parse glued named arg" {
+    const base = &std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base.*);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const Spec = struct {
+        count: usize = undefined,
+    };
+
+    const r1 = try tstParse(allocator, "program --count10", Spec);
+    try std.testing.expectEqual(10, r1.options.count);
 }
 
 test "parse positionals" {

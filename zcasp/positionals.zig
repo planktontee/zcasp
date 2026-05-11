@@ -7,6 +7,9 @@ const argIter = @import("iterator.zig");
 const Allocator = std.mem.Allocator;
 const PrimitiveCodec = argCodec.PrimitiveCodec;
 const TstArgCursor = argIter.TstArgCursor;
+const Array = regent.meta.Array;
+const Optional = regent.meta.Optional;
+const Pointer = regent.meta.Pointer;
 
 pub const EmptyPositionalsOf = PositionalOf(.{
     .TupleType = void,
@@ -49,13 +52,14 @@ pub fn PositionalOfWithDefault(comptime Config: PositionalConfig, reminderDefaul
                 "Unsupported Reminder type {s}, it has to be a collection",
                 .{@typeName(ReminderT)},
             );
+
             return comptime rfd: switch (@typeInfo(ReminderT)) {
                 .optional => |opt| switch (@typeInfo(opt.child)) {
                     .array, .pointer => continue :rfd @typeInfo(opt.child),
                     else => @compileError(unsupportedMessage),
                 },
-                .array => |arr| @typeInfo(@Type(.{ .array = arr })),
-                .pointer => |ptr| @typeInfo(@Type(.{ .pointer = ptr })),
+                .array => |arr| @typeInfo(Array(arr)),
+                .pointer => |ptr| @typeInfo(Pointer(ptr)),
                 .void => @typeInfo(void),
                 else => @compileError(unsupportedMessage),
             };
@@ -64,8 +68,8 @@ pub fn PositionalOfWithDefault(comptime Config: PositionalConfig, reminderDefaul
         fn remindChildT() type {
             return rfd: switch (@typeInfo(ReminderT)) {
                 .optional => |opt| continue :rfd @typeInfo(opt.child),
-                .array => |arr| std.meta.Child(@Type(.{ .array = arr })),
-                .pointer => |ptr| std.meta.Child(@Type(.{ .pointer = ptr })),
+                .array => |arr| std.meta.Child(Array(arr)),
+                .pointer => |ptr| std.meta.Child(Pointer(ptr)),
                 else => @compileError(std.fmt.comptimePrint(
                     "Unsupported Reminder type {s}, it has to be a collection",
                     .{@typeName(ReminderT)},
@@ -163,7 +167,7 @@ pub fn PositionalOfWithDefault(comptime Config: PositionalConfig, reminderDefaul
                     @compileLog(remindChildT());
                     @compileError("Unsupported call to nextReminder with non inner list");
                 } else {
-                    self.list = try std.ArrayListUnmanaged([]const u8).initCapacity(allocator, 8);
+                    self.list = try std.ArrayListUnmanaged(remindChildT()).initCapacity(allocator, 8);
                 }
             }
 

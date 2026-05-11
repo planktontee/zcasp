@@ -9,7 +9,7 @@ const TstArgCursor = argIter.TstArgCursor;
 pub const range = @import("extra/range.zig");
 pub const byteUnit = @import("extra/byteUnit.zig");
 
-pub fn ensureTypeTag(comptime T: type, comptime tag: @Type(.enum_literal)) void {
+pub fn ensureTypeTag(comptime T: type, comptime tag: @EnumLiteral()) void {
     comptime if (@typeInfo(T) != tag) @compileError(std.fmt.comptimePrint(
         "Type given to parse method is not {s}, it is {s}",
         .{

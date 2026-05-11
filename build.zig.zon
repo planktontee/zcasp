@@ -3,11 +3,11 @@
     .version = "0.0.1",
     .dependencies = .{
         .regent = .{
-            .url = "git+https://github.com/planktontee/regent/#7f8925233a23405a9529416e6dadee1c5fd7c953",
-            .hash = "regent-0.0.1-zgdbw-cuAAAqyrK_MdAT1upi5_SvkOAJuE4L7ctd4xyn",
+            .url = "git+https://github.com/planktontee/regent.git#edd61f590999adc4468ea1bd64a8fb87389bcc89",
+            .hash = "regent-0.0.1-zgdbw5M0AADMnI5YAFbqNkh9dCJ_sWOM7USTQrghPUxL",
         },
     },
-    .minimum_zig_version = "0.15.2",
+    .minimum_zig_version = "0.16.0",
     .paths = .{
         "build.zig",
         "build.zig.zon",

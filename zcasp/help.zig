@@ -94,7 +94,7 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
 
         pub fn verbShortDesc(comptime name: []const u8) ?[]const u8 {
             return comptime rt: {
-                const T = std.meta.TagPayloadByName(Verb, name);
+                const T = @FieldType(Verb, name);
                 if (!@hasDecl(T, "Help")) break :rt null;
                 const THelp: HelpData(T) = T.Help;
                 break :rt THelp.shortDescription;

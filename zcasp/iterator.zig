@@ -3,14 +3,11 @@ const coll = @import("regent").collections;
 const Allocator = std.mem.Allocator;
 
 pub const TstArgCursor = struct {
-    iterator: std.process.ArgIteratorGeneral(.{}),
+    iterator: std.process.Args.IteratorGeneral(.{}),
 
     pub fn init(allocator: *const Allocator, data: [:0]const u8) !@This() {
         return .{
-            .iterator = try std.process.ArgIteratorGeneral(.{}).init(
-                allocator.*,
-                data,
-            ),
+            .iterator = try .init(allocator.*, data),
         };
     }
 
