@@ -4,3 +4,5 @@ allgirs
 zcasp.zip
 zig-pkg
 .vscode
+dependencies
+.gitmodules
