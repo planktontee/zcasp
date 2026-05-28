@@ -97,7 +97,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                 SpecCodec.Error ||
                 PosOf.Error;
             errors = errors || if (VerbT != void) SpecVerbsErrors() else error{};
-            errors = errors || if (SpecTracker != void) SpecTracker.Error else error{};
+            errors = errors || if (SpecTracker != void) validate.Error else error{};
             break :E errors;
         };
 
@@ -918,7 +918,7 @@ test "parse verb" {
             .mandatoryVerb = true,
         };
     };
-    try std.testing.expectError(GroupTracker(Spec).Error.MissingVerb, tstParse(allocator, "program", Spec));
+    try std.testing.expectError(validate.Error.MissingVerb, tstParse(allocator, "program", Spec));
     const r1 = try tstParse(allocator, "program copy --src file1", Spec);
     const r2 = try tstParse(allocator, "program paste --target file2", Spec);
     const r3 = try tstParse(allocator, "program --verbose false copy --src file3", Spec);
@@ -1177,15 +1177,7 @@ test "validate require" {
         i5: ?i32 = null,
         i6: ?i32 = null,
 
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
-            .mutuallyInclusive = &.{
-                &.{ .i3, .i4 },
-            },
-            .mutuallyExclusive = &.{
-                &.{ .i5, .i6 },
-            },
-            .required = &.{ .i, .i2 },
-        };
+        pub const GroupMatch: GroupMatchConfig(@This()) = .{};
     };
     const r = try tstParse(allocator,
         \\program
@@ -1232,9 +1224,6 @@ test "help and inner help" {
             pub const Help: HelpData(@This()) = .{
                 .description = "copy test",
                 .shortDescription = "copy test",
-            };
-            pub const GroupMatch: GroupMatchConfig(@This()) = .{
-                .required = &.{.path},
             };
         };
         pub const Verb = union(enum) {

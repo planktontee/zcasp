@@ -69,14 +69,15 @@ test "track bits for field" {
 }
 
 pub fn GroupMatchConfig(Spec: type) type {
-    const SpecEnumFields = std.meta.FieldEnum(Spec);
     return struct {
-        mutuallyInclusive: []const []const SpecEnumFields = &.{},
-        // TODO: rename this, oneOf demands one, mutually exclusive is optional in nature
-        mutuallyExclusive: []const []const SpecEnumFields = &.{},
-        required: []const SpecEnumFields = &.{},
         mandatoryVerb: bool = false,
         ensureCursorDone: bool = true,
+
+        validateFn: fn (FieldBitSet(Spec)) Error!void = struct {
+            fn validate(_: FieldBitSet(Spec)) Error!void {
+                return;
+            }
+        }.validate,
     };
 }
 
@@ -85,6 +86,15 @@ pub fn GroupTracker(Spec: type) type {
     return GroupTrackerWithConfig(Spec, Spec.GroupMatch);
 }
 
+pub const Error = error{
+    MissingVerb,
+    RequiredArgsMissing,
+    MutualArgsMissing,
+    MutuallyExclusiveArgsPresent,
+    ArgumentChainMissing,
+    CursorNotDone,
+};
+
 pub fn GroupTrackerWithConfig(Spec: type, comptime config: GroupMatchConfig(Spec)) type {
     const SpecEnumFields = std.meta.FieldEnum(Spec);
 
@@ -92,14 +102,6 @@ pub fn GroupTrackerWithConfig(Spec: type, comptime config: GroupMatchConfig(Spec
         fbset: FieldBitSet(Spec) = .{},
         verb: bool = false,
         cursorDoneFlag: bool = false,
-
-        pub const Error = error{
-            MissingRequiredField,
-            MutuallyInclusiveConstraintNotMet,
-            MutuallyExclusiveConstraintNotMet,
-            MissingVerb,
-            CursorNotDone,
-        };
 
         pub fn parsed(self: *@This(), comptime tag: SpecEnumFields) void {
             self.fbset.fieldSet(tag);
@@ -111,22 +113,6 @@ pub fn GroupTrackerWithConfig(Spec: type, comptime config: GroupMatchConfig(Spec
 
         pub fn cursorDone(self: *@This()) void {
             self.cursorDoneFlag = true;
-        }
-
-        pub fn checkRequired(self: *const @This()) Error!void {
-            if (!self.fbset.allOf(config.required)) return Error.MissingRequiredField;
-        }
-
-        pub fn checkMutuallyInclusive(self: *const @This()) Error!void {
-            inline for (config.mutuallyInclusive) |group| {
-                if (!self.fbset.allOf(group)) return Error.MutuallyInclusiveConstraintNotMet;
-            }
-        }
-
-        pub fn checkMutuallyExclusive(self: *const @This()) Error!void {
-            inline for (config.mutuallyExclusive) |group| {
-                if (!self.fbset.oneOf(group)) return Error.MutuallyExclusiveConstraintNotMet;
-            }
         }
 
         pub fn checkVerb(self: *const @This()) Error!void {
@@ -141,11 +127,8 @@ pub fn GroupTrackerWithConfig(Spec: type, comptime config: GroupMatchConfig(Spec
             }
         }
 
-        // TODO: add validation chains (if a, then b, but only if a)
         pub fn validate(self: *const @This()) Error!void {
-            try self.checkMutuallyExclusive();
-            try self.checkMutuallyInclusive();
-            try self.checkRequired();
+            try config.validateFn(self.fbset);
             try self.checkVerb();
             try self.checkCursorDone();
         }
@@ -155,60 +138,20 @@ pub fn GroupTrackerWithConfig(Spec: type, comptime config: GroupMatchConfig(Spec
 test "check required fields" {
     const t = std.testing;
     const Spec = struct {
-        i: ?i32 = null,
-        i2: ?i32 = null,
-        i3: ?i32 = null,
-        i4: ?i32 = null,
-        i5: ?i32 = null,
-        i6: ?i32 = null,
-        i7: ?i32 = null,
-        i8: ?i32 = null,
-
         pub const GroupMatch: GroupMatchConfig(@This()) = .{
-            .mutuallyInclusive = &.{
-                &.{ .i, .i2 },
-                &.{ .i3, .i4 },
-            },
-            .mutuallyExclusive = &.{
-                &.{ .i5, .i6 },
-            },
-            .required = &.{ .i7, .i8 },
             .mandatoryVerb = true,
         };
     };
 
     var tracker = GroupTracker(Spec){};
-    try t.expectError(@TypeOf(tracker).Error.MutuallyExclusiveConstraintNotMet, tracker.validate());
-    try t.expectError(@TypeOf(tracker).Error.MutuallyExclusiveConstraintNotMet, tracker.checkMutuallyExclusive());
-    tracker.parsed(.i5);
-    try t.expectEqual({}, try tracker.checkMutuallyExclusive());
-    const tracker1 = tracker;
-    tracker.parsed(.i6);
-    try t.expectError(@TypeOf(tracker).Error.MutuallyExclusiveConstraintNotMet, tracker.checkMutuallyExclusive());
-    tracker = tracker1;
 
-    try t.expectError(@TypeOf(tracker).Error.MutuallyInclusiveConstraintNotMet, tracker.validate());
-    try t.expectError(@TypeOf(tracker).Error.MutuallyInclusiveConstraintNotMet, tracker.checkMutuallyInclusive());
-    tracker.parsed(.i);
-    tracker.parsed(.i2);
-    try t.expectError(@TypeOf(tracker).Error.MutuallyInclusiveConstraintNotMet, tracker.checkMutuallyInclusive());
-    tracker.parsed(.i3);
-    tracker.parsed(.i4);
-    try t.expectEqual({}, try tracker.checkMutuallyInclusive());
-
-    try t.expectError(@TypeOf(tracker).Error.MissingRequiredField, tracker.validate());
-    try t.expectError(@TypeOf(tracker).Error.MissingRequiredField, tracker.checkRequired());
-    tracker.parsed(.i7);
-    tracker.parsed(.i8);
-    try t.expectEqual({}, try tracker.checkRequired());
-
-    try t.expectError(@TypeOf(tracker).Error.MissingVerb, tracker.validate());
-    try t.expectError(@TypeOf(tracker).Error.MissingVerb, tracker.checkVerb());
+    try t.expectError(Error.MissingVerb, tracker.validate());
+    try t.expectError(Error.MissingVerb, tracker.checkVerb());
     tracker.parsedVerb();
     try t.expectEqual({}, try tracker.checkVerb());
 
-    try t.expectError(@TypeOf(tracker).Error.CursorNotDone, tracker.validate());
-    try t.expectError(@TypeOf(tracker).Error.CursorNotDone, tracker.checkCursorDone());
+    try t.expectError(Error.CursorNotDone, tracker.validate());
+    try t.expectError(Error.CursorNotDone, tracker.checkCursorDone());
     tracker.cursorDone();
     try t.expectEqual({}, try tracker.validate());
     try t.expectEqual({}, try tracker.checkCursorDone());
