@@ -6,8 +6,8 @@
         //     .path = "dependencies/regent",
         // },
         .regent = .{
-            .url = "git+https://github.com/planktontee/regent.git#b8da172ada2f7e593b94af3bd5f5365fa2df1834",
-            .hash = "regent-0.0.1-zgdbw7tAAQDdGysBBf3cX3Rk1ohQgnWymbXQqc0l6TEY",
+            .url = "git+https://github.com/planktontee/regent.git#1f41743e2fbc9264cda8e777895b1b6990978ce5",
+            .hash = "regent-0.0.1-zgdbw-dIAQCOAEPzWvqq1LIAoGFqgudbU2WM8G-kMtqv",
         },
     },
     .minimum_zig_version = "0.16.0",
