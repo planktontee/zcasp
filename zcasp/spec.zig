@@ -1225,6 +1225,15 @@ test "help and inner help" {
                 .description = "copy test",
                 .shortDescription = "copy test",
             };
+
+            pub fn checkFields(set: validate.FieldBitSet(@This())) validate.Error!void {
+                if (!set.allOf(.{.path}))
+                    return error.RequiredArgsMissing;
+            }
+
+            pub const GroupMatch: GroupMatchConfig(@This()) = .{
+                .validateFn = @This().checkFields,
+            };
         };
         pub const Verb = union(enum) {
             copy: Copy,
@@ -1272,7 +1281,7 @@ test "help and inner help" {
     r = Res.init(std.testing.allocator);
     if (r.parse(&c)) |err| {
         try std.testing.expectEqualStrings(
-            \\Failed with reason: MissingRequiredField
+            \\Failed with reason: RequiredArgsMissing
             \\
             \\  copy test
             \\

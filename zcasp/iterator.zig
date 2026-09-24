@@ -211,7 +211,12 @@ pub const AtDepthArrayTokenizer = struct {
                             continue :stateLoop;
                         },
 
-                        ',', ']' => return Error.EmptyCommaSplit,
+                        ',' => return Error.EmptyCommaSplit,
+                        ']' => {
+                            self.valueStart = self.cursor;
+                            self.state = .postValue;
+                            continue :stateLoop;
+                        },
 
                         else => {
                             self.valueStart = self.cursor;
@@ -456,19 +461,6 @@ test "Depth 1 Array tokenizer (non-string)" {
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "\t[1,"));
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "[1,\t"));
 
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1,]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1, ]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1,  ]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1,\t]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1,\t\t]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1, \t]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1\t,]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1 \t,]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[1\t,\t]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, " [1, ] "));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "\t[1,\t]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, " \t[1, ]\t "));
-
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[ ,]"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[  ,]"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[\t,]"));
@@ -524,6 +516,18 @@ test "Depth 1 Array tokenizer (non-string)" {
     try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, " 1 "));
     try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "\t1\t"));
     try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "1,"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "[1,]"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "[1, ]"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "[1,  ]"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "[1,\t]"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "[1,\t\t]"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "[1, \t]"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "[1\t,]"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "[1 \t,]"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "[1\t,\t]"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, " [1, ] "));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "\t[1,\t]"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, " \t[1, ]\t "));
 
     const expectTwo: []const []const u8 = &.{ "1", "1" };
     try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "[1,1]"));
@@ -599,6 +603,11 @@ test "Depth 2+ Array tokenizer (non-string)" {
     try t.expectEqualDeep(expectMultipleRaw, try tstCollectTokens(allocator, " [ [], [1], [2,3] ] "));
     try t.expectEqualDeep(expectMultipleRaw, try tstCollectTokens(allocator, "\t[ [], [1], [2,3] ]\t"));
 
+    const expect1Item: []const []const u8 = &.{"[1, 2]"};
+    try t.expectEqualDeep(expect1Item, try tstCollectTokens(allocator, "[[1, 2], ]"));
+    const expect2Items: []const []const u8 = &.{ "[1, 2]", "[3]" };
+    try t.expectEqualDeep(expect2Items, try tstCollectTokens(allocator, "[[1, 2], [3],]"));
+
     const expectOneRawNested: []const []const u8 = &.{"[[]]"};
     try t.expectEqualDeep(expectOneRawNested, try tstCollectTokens(allocator, "[[[]]]"));
     try t.expectEqualDeep(expectOneRawNested, try tstCollectTokens(allocator, " [[[]]] "));
@@ -612,8 +621,6 @@ test "Depth 2+ Array tokenizer (non-string)" {
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, " [ [ ]"));
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "[[1], [2,]"));
 
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[[1, 2], ]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[[1, 2], [3],]"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[[], , [1]]"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[[1, 2], , [3]]"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[[], , [1]]"));
@@ -691,6 +698,10 @@ test "Depth 1 Array tokenizer (strings)" {
     const expectMixedWhitespaceString: []const []const u8 = &.{" \t\t "};
     try t.expectEqualDeep(expectMixedWhitespaceString, try tstCollectTokens(allocator, "[ ' \t\t ' ]"));
 
+    const expectOne: []const []const u8 = &.{"a"};
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "['a', ]"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "[ 'a',    ]"));
+
     const expectTwo: []const []const u8 = &.{ "a", "b" };
     try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "['a','b']"));
     try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "[ 'a', 'b' ]"));
@@ -751,8 +762,6 @@ test "Depth 1 Array tokenizer (strings)" {
     try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "['it'broken']"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[, 'a']"));
     try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "['a', , 'b']"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "['a', ]"));
-    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "[ 'a',    ]"));
 
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "['a',"));
     try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "['a'"));

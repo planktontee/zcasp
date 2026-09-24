@@ -867,7 +867,9 @@ test "commands" {
     try t.expectEqualStrings(
         \\Commands:
         \\
-        \\  aVeryBigNameWithLotsOfLettersHereRightNow       This happens to be a very very long description on how to use a very specific piece of software create by a very specific human being (sometimes human).
+        \\  aVeryBigNameWithLotsOfLettersHereRightNow       This happens to be a very very long description on how to use a very 
+        \\                                                  specific piece of software create by a very specific human being 
+        \\                                                  (sometimes human).
         \\  nameForSomething                                Just a brief description of a sorts
         \\  short                                           A
         \\  d                                               grapefruit
@@ -1397,58 +1399,40 @@ test "groupmatch info" {
     try t.expectEqualStrings(
         \\Options:
         \\  --n1
-        \\    [Required]
         \\
         \\  --n2
-        \\    [Required]
         \\
         \\  --a1
-        \\    [Required] [Requires: --a2, --a6, --a3, --a7] [Excludes: --a5, --a8]
         \\
         \\  --a2
-        \\    [Requires: --a1, --a6]
         \\
         \\  --a3
-        \\    [Requires: --a1, --a7]
         \\
         \\  --a4
-        \\    [Requires: --a5, --a8]
         \\
         \\  --a5
-        \\    [Requires: --a4, --a8] [Excludes: --a1, --a8]
         \\
         \\  --a6
-        \\    [Requires: --a1, --a2]
         \\
         \\  --a7
-        \\    [Requires: --a1, --a3]
         \\
         \\  --a8
-        \\    [Requires: --a4, --a5] [Excludes: --a1, --a5]
         \\
         \\  --b1
-        \\    [Required] [Requires: --b5, --b8] [Excludes: --b2, --b6, --b3, --b7]
         \\
         \\  --b2
-        \\    [Excludes: --b1, --b6]
         \\
         \\  --b3
-        \\    [Excludes: --b1, --b7]
         \\
         \\  --b4
-        \\    [Excludes: --b5, --b8]
         \\
         \\  --b5
-        \\    [Requires: --b1, --b8] [Excludes: --b4, --b8]
         \\
         \\  --b6
-        \\    [Excludes: --b1, --b2]
         \\
         \\  --b7
-        \\    [Excludes: --b1, --b3]
         \\
         \\  --b8
-        \\    [Requires: --b1, --b5] [Excludes: --b4, --b5]
     , HelpFmt(struct {
         n1: u32 = undefined,
         n2: u32 = undefined,
@@ -1510,7 +1494,7 @@ test "groupmatch info" {
     try t.expectEqualStrings(
         \\Options:
         \\  --n1
-        \\    [Required] n1 desc
+        \\    n1 desc
         \\
         \\  --n2
     , HelpFmt(struct {
@@ -1611,7 +1595,7 @@ test "help" {
         \\
         \\Options:
         \\
-        \\  -i, --i1 (i32 = 0)      [Required] i1 desc
+        \\  -i, --i1 (i32 = 0)      i1 desc
         \\
     , HelpFmt(struct {
         i1: i32 = 0,
