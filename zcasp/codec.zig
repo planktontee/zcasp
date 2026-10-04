@@ -4,6 +4,8 @@ const coll = regent.collections;
 const argIter = @import("iterator.zig");
 const Allocator = std.mem.Allocator;
 const AtDepthArrayTokenizer = argIter.AtDepthArrayTokenizer;
+const AtDepthStructTokenizer = argIter.AtDepthStructTokenizer;
+const FieldBitSet = @import("validate.zig").FieldBitSet;
 const TstArgCursor = argIter.TstArgCursor;
 
 pub const range = @import("extra/range.zig");
@@ -43,10 +45,15 @@ pub const PrimitiveCodec = struct {
         ParseCharEndOfIterator,
         CharIsBiggerThan1Byte,
         ParseBoolEndOfIterator,
+        ParseStructEndOfIterator,
         InvalidEnum,
         InvalidBoolLiteral,
+        UnknownStructField,
+        MissingStructField,
+        DuplicateStructField,
     } ||
         AtDepthArrayTokenizer.Error ||
+        AtDepthStructTokenizer.Error ||
         std.fmt.ParseIntError ||
         std.fmt.ParseFloatError ||
         std.mem.Allocator.Error;
@@ -104,6 +111,10 @@ pub const PrimitiveCodec = struct {
                     cursor,
                 ),
             .optional => @This().parseOpt(codec, T, tag, allocator, cursor),
+            .@"struct" => |st| if (comptime st.is_tuple)
+                @compileError(unsupportedMessage)
+            else
+                @This().parseStruct(codec, T, tag, allocator, cursor),
             else => @compileError(unsupportedMessage),
         };
     }
@@ -129,6 +140,7 @@ pub const PrimitiveCodec = struct {
             target[i] = try parseByType(codec, ArrayT, tag, allocator, cursor);
             i += 1;
         }
+        if (i != target.len) return Error.ParseArrayBufferValueSizeMismatch;
         return target;
     }
 
@@ -161,6 +173,52 @@ pub const PrimitiveCodec = struct {
         } else {
             return array.toOwnedSlice(allc);
         }
+    }
+
+    pub fn parseStruct(
+        codec: anytype,
+        comptime T: type,
+        comptime tag: anytype,
+        allocator: *const Allocator,
+        cursor: *CursorT,
+    ) (Error || std.meta.Child(@TypeOf(codec)).Error)!T {
+        comptime ensureTypeTag(T, .@"struct");
+        const fields = comptime @typeInfo(T).@"struct".fields;
+        const FieldTag = std.meta.FieldEnum(T);
+
+        const slice = cursor.next() orelse return Error.ParseStructEndOfIterator;
+        var structTokenizer = AtDepthStructTokenizer.init(slice);
+        var target: T = undefined;
+        var parsed: FieldBitSet(T) = .{};
+
+        while (try structTokenizer.next()) |field| {
+            // map doesnt help much here tbh
+            inline for (fields) |f| {
+                if (std.mem.eql(u8, f.name, field.key)) {
+                    const fieldTag = @field(FieldTag, f.name);
+                    if (parsed.isFieldSet(fieldTag)) return Error.DuplicateStructField;
+                    cursor.stackItem(field.value);
+                    @field(target, f.name) = try parseByType(
+                        codec,
+                        f.type,
+                        tag,
+                        allocator,
+                        cursor,
+                    );
+                    parsed.fieldSet(fieldTag);
+                    break;
+                }
+            } else return Error.UnknownStructField;
+        }
+
+        inline for (fields) |f| {
+            if (!parsed.isFieldSet(@field(FieldTag, f.name))) @field(
+                target,
+                f.name,
+            ) = f.defaultValue() orelse return Error.MissingStructField;
+        }
+
+        return target;
     }
 
     pub fn isNull(cursor: *CursorT) bool {
@@ -758,6 +816,117 @@ test "codec parseFlag" {
     _ = cursor.next();
     try std.testing.expect(try codec.parseByTag(.@"test", allocator, &cursor));
     try std.testing.expectEqual(null, cursor.curr);
+}
+
+fn tstParseStructArg(comptime T: type, allocator: *const Allocator, arg: []const u8) !T {
+    const data = [_][]const u8{arg};
+    var dcur: coll.DebugCursor = .{ .data = &data };
+    var cursor = dcur.asCursor();
+    var codec = ArgCodec(struct { v: T }){};
+    return codec.parseByTag(.v, allocator, &cursor);
+}
+
+test "codec parseStruct" {
+    const t = std.testing;
+    const baseAllocator = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(baseAllocator);
+    defer arena.deinit();
+    const allocator = &arena.allocator();
+
+    const Size = enum { small, large };
+    const Point = struct { x: i32, y: i32 = 0 };
+    const Config = struct {
+        name: []const u8,
+        nameZ: [:0]const u8 = "z",
+        tag: [3]u8 = "abc".*,
+        c: u8 = 'c',
+        n: u16,
+        f: f32 = 1.5,
+        on: bool = false,
+        size: Size = .small,
+        maybe: ?i32 = 3,
+        list: []const i32 = &.{},
+        fixed: [2]i32 = .{ 0, 0 },
+        point: Point = .{ .x = 0 },
+        points: []const Point = &.{},
+        optPoint: ?Point = null,
+        nested: []const []const ?bool = &.{},
+    };
+
+    const full = try tstParseStructArg(Config, allocator,
+        \\{"name": "zcasp", "nameZ": "zz", "tag": "xyz", "c": "q", "n": 42, "f": -2.25, "on": true, "size": "large", "maybe": null, "list": [1, -2, 3], "fixed": [7, 8], "point": {"x": 1, "y": 2}, "points": [{"x": 3}, {"x": 4, "y": 5}], "optPoint": {"x": 9, "y": 9}, "nested": [[true, null], []]}
+    );
+    try t.expectEqualStrings("zcasp", full.name);
+    try t.expectEqualStrings("zz", full.nameZ);
+    try t.expectEqualStrings("xyz", &full.tag);
+    try t.expectEqual('q', full.c);
+    try t.expectEqual(42, full.n);
+    try t.expectEqual(-2.25, full.f);
+    try t.expect(full.on);
+    try t.expectEqual(Size.large, full.size);
+    try t.expectEqual(null, full.maybe);
+    try t.expectEqualDeep(@as([]const i32, &.{ 1, -2, 3 }), full.list);
+    try t.expectEqual([2]i32{ 7, 8 }, full.fixed);
+    try t.expectEqual(Point{ .x = 1, .y = 2 }, full.point);
+    try t.expectEqualDeep(@as([]const Point, &.{ .{ .x = 3 }, .{ .x = 4, .y = 5 } }), full.points);
+    try t.expectEqual(Point{ .x = 9, .y = 9 }, full.optPoint.?);
+    const expectNested: []const []const ?bool = &.{ &.{ true, null }, &.{} };
+    try t.expectEqualDeep(expectNested, full.nested);
+
+    const minimal = try tstParseStructArg(Config, allocator, "{name: hi, n: 1}");
+    try t.expectEqualStrings("hi", minimal.name);
+    try t.expectEqualStrings("z", minimal.nameZ);
+    try t.expectEqualStrings("abc", &minimal.tag);
+    try t.expectEqual('c', minimal.c);
+    try t.expectEqual(1, minimal.n);
+    try t.expectEqual(1.5, minimal.f);
+    try t.expect(!minimal.on);
+    try t.expectEqual(Size.small, minimal.size);
+    try t.expectEqual(3, minimal.maybe.?);
+    try t.expectEqual(0, minimal.list.len);
+    try t.expectEqual(Point{ .x = 0 }, minimal.point);
+    try t.expectEqual(null, minimal.optPoint);
+
+    const singleQuoted = try tstParseStructArg(Config, allocator, "{'name': 'a, b', 'n': '7', 'list': '[1]'}");
+    try t.expectEqualStrings("a, b", singleQuoted.name);
+    try t.expectEqual(7, singleQuoted.n);
+    try t.expectEqualDeep(@as([]const i32, &.{1}), singleQuoted.list);
+
+    const Empty = struct {};
+    try t.expectEqual(Empty{}, try tstParseStructArg(Empty, allocator, "{}"));
+    try t.expectEqual(null, try tstParseStructArg(?Point, allocator, "null"));
+    try t.expectEqual(Point{ .x = -1 }, (try tstParseStructArg(?Point, allocator, "{x: -1}")).?);
+    try t.expectEqualDeep(@as([]const Point, &.{ .{ .x = 1 }, .{ .x = 2, .y = 3 } }), try tstParseStructArg([]const Point, allocator, "[{\"x\": 1}, {\"x\": 2, \"y\": 3}]"));
+    try t.expectEqual([2]Point{ .{ .x = 1 }, .{ .x = 2 } }, try tstParseStructArg([2]Point, allocator, "[{x: 1}, {x: 2}]"));
+    try t.expectEqual('1', (try tstParseStructArg(struct { a: u8 }, allocator, "{\"a\": 1}")).a);
+
+    const C = ArgCodec(struct {});
+    try t.expectError(C.Error.UnknownStructField, tstParseStructArg(Point, allocator, "{x: 1, z: 1}"));
+    try t.expectError(C.Error.MissingStructField, tstParseStructArg(Point, allocator, "{y: 1}"));
+    try t.expectError(C.Error.MissingStructField, tstParseStructArg(Point, allocator, "{}"));
+    try t.expectError(C.Error.DuplicateStructField, tstParseStructArg(Point, allocator, "{x: 1, x: 2}"));
+    try t.expectError(C.Error.InvalidCharacter, tstParseStructArg(Point, allocator, "{x: one}"));
+    try t.expectError(C.Error.InvalidCharacter, tstParseStructArg(Point, allocator, "{x: [1]}"));
+    try t.expectError(C.Error.MissingKeyValueSeparator, tstParseStructArg(Point, allocator, "{x 1}"));
+    try t.expectError(C.Error.MissingStructLayer, tstParseStructArg(Point, allocator, "x: 1"));
+    try t.expectError(C.Error.UnknownStructField, tstParseStructArg(Config, allocator, "{name: a, n: 1, point: {x: 1, w: 2}}"));
+    try t.expectEqualDeep(@as([]const Point, &.{.{ .x = 1 }}), try tstParseStructArg([]const Point, allocator, "{x: 1}"));
+    try t.expectEqualDeep(@as([]const Point, &.{ .{ .x = 1 }, .{ .x = 2, .y = 3 } }), try tstParseStructArg([]const Point, allocator, "{x: 1}, {\"x\": 2, \"y\": 3},"));
+    try t.expectEqual([2]Point{ .{ .x = 1 }, .{ .x = 2 } }, try tstParseStructArg([2]Point, allocator, "{x: 1},{x: 2}"));
+    try t.expectError(C.Error.ParseArrayBufferValueSizeMismatch, tstParseStructArg([2]Point, allocator, "{x: 1}"));
+    try t.expectEqual(null, try tstParseStructArg(?[]const Point, allocator, "null"));
+    try t.expectEqualDeep(@as([]const Point, &.{.{ .x = 7 }}), (try tstParseStructArg(?[]const Point, allocator, "{x: 7}")).?);
+    try t.expectError(C.Error.SyntaxError, tstParseStructArg([]const Point, allocator, "{x: 1}, 2"));
+    try t.expectError(C.Error.ParseArrayBufferValueSizeMismatch, tstParseStructArg([1]Point, allocator, "[{x: 1}, {x: 2}]"));
+    try t.expectError(C.Error.ParseArrayBufferValueSizeMismatch, tstParseStructArg([2]Point, allocator, "[{x: 1}]"));
+    try t.expectError(C.Error.ParseArrayBufferValueSizeMismatch, tstParseStructArg([3]f32, allocator, "[1, 2]"));
+    try t.expectError(C.Error.ParseArrayBufferValueSizeMismatch, tstParseStructArg([3]f32, allocator, "[]"));
+    try t.expectError(C.Error.ParseArrayBufferValueSizeMismatch, tstParseStructArg(Config, allocator, "{name: a, n: 1, fixed: [1]}"));
+
+    var empty: coll.DebugCursor = .{ .data = &.{} };
+    var emptyCursor = empty.asCursor();
+    var codec = ArgCodec(struct { v: Point }){};
+    try t.expectError(C.Error.ParseStructEndOfIterator, codec.parseByTag(.v, allocator, &emptyCursor));
 }
 
 test {

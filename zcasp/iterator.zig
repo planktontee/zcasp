@@ -65,6 +65,7 @@ pub const AtDepthArrayTokenizer = struct {
     valueStart: usize = 0,
     state: State = .noop,
     stack: usize = 0,
+    quote: u8 = '\'',
 
     pub fn init(input: []const u8) @This() {
         return .{
@@ -102,11 +103,17 @@ pub const AtDepthArrayTokenizer = struct {
         subArrayString,
         anyValue,
         subArrayAnyValue,
+        phantomStruct,
+        phantomStructString,
+        postPhantomStruct,
     };
 
     pub fn skipWhiteSpace(self: *@This()) Error!void {
-        while (self.cursor < self.input.len) : (self.cursor += 1) {
-            switch (self.input[self.cursor]) {
+        const input = self.input;
+        var cursor = self.cursor;
+        defer self.cursor = cursor;
+        while (cursor < input.len) : (cursor += 1) {
+            switch (input[cursor]) {
                 ' ', '\t' => continue,
                 '\r', '\n' => return Error.UnsupportedBreakline,
                 else => return,
@@ -135,6 +142,12 @@ pub const AtDepthArrayTokenizer = struct {
         // Stacks are finished but there's a next token
         if (self.stack == 0 and self.state != .post1dValue) return Error.SyntaxError;
         return false;
+    }
+
+    pub fn sliceTo(self: *@This(), end: usize) []const u8 {
+        const slice = self.input[self.valueStart..end];
+        self.valueStart = end;
+        return slice;
     }
 
     pub fn takeValueSlice(self: *@This()) []const u8 {
@@ -184,8 +197,15 @@ pub const AtDepthArrayTokenizer = struct {
                             self.state = .arrayStart;
                             continue :stateLoop;
                         },
-                        '\'', ']' => return Error.MissingArrayLayer,
-                        ',' => return Error.SyntaxError,
+                        '{' => {
+                            self.valueStart = self.cursor;
+                            self.cursor += 1;
+                            self.stack = 1;
+                            self.state = .phantomStruct;
+                            continue :stateLoop;
+                        },
+                        '\'', '"', ']' => return Error.MissingArrayLayer,
+                        ',', '}' => return Error.SyntaxError,
                         else => {
                             self.valueStart = self.cursor;
                             self.cursor += 1;
@@ -196,7 +216,7 @@ pub const AtDepthArrayTokenizer = struct {
                 },
                 .value => {
                     switch (try self.skipWhiteSpaceExpectByte()) {
-                        '[' => {
+                        '[', '{' => {
                             self.valueStart = self.cursor;
                             self.cursor += 1;
                             self.stack += 1;
@@ -204,7 +224,8 @@ pub const AtDepthArrayTokenizer = struct {
                             continue :stateLoop;
                         },
 
-                        '\'' => {
+                        '\'', '"' => |quote| {
+                            self.quote = quote;
                             self.cursor += 1;
                             self.valueStart = self.cursor;
                             self.state = .string;
@@ -240,16 +261,24 @@ pub const AtDepthArrayTokenizer = struct {
                     }
                 },
                 .phantom1dArray => {
-                    while (self.cursor < self.input.len) : (self.cursor += 1) {
-                        switch (self.input[self.cursor]) {
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        switch (input[cursor]) {
                             ',' => {
                                 // rewinding to remove empty to the right
-                                const slice = self.takeValueSliceWithoutEmpty();
+                                const slice = sync: {
+                                    self.cursor = cursor;
+                                    break :sync self.takeValueSliceWithoutEmpty();
+                                };
                                 self.state = .post1dValue;
                                 return slice;
                             },
                             ']',
                             '[',
+                            '{',
+                            '}',
                             '\'',
                             '\n',
                             '\r',
@@ -258,9 +287,75 @@ pub const AtDepthArrayTokenizer = struct {
                             else => continue,
                         }
                     }
-                    const slice = self.takeValueSliceWithoutEmpty();
+                    const slice = sync: {
+                        self.cursor = cursor;
+                        break :sync self.takeValueSliceWithoutEmpty();
+                    };
                     self.state = .post1dValue;
                     return slice;
+                },
+                .phantomStruct => {
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        switch (input[cursor]) {
+                            '[', '{' => self.stack += 1,
+                            ']', '}' => {
+                                self.stack -= 1;
+                                if (self.stack == 0) {
+                                    cursor += 1;
+                                    self.state = .postPhantomStruct;
+                                    return self.sliceTo(cursor);
+                                }
+                            },
+                            '\'', '"' => |quote| {
+                                self.quote = quote;
+                                cursor += 1;
+                                self.state = .phantomStructString;
+                                continue :stateLoop;
+                            },
+                            '\n', '\r' => return Error.SyntaxError,
+                            else => continue,
+                        }
+                    }
+                    return Error.UnexpectedEndOfInput;
+                },
+                .phantomStructString => {
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        if (input[cursor] == self.quote) {
+                            cursor += 1;
+                            self.state = .phantomStruct;
+                            continue :stateLoop;
+                        }
+                    }
+                    return Error.EarlyQuoteTermination;
+                },
+                .postPhantomStruct => {
+                    try self.skipWhiteSpace();
+                    if (self.cursor >= self.input.len) return null;
+                    switch (self.input[self.cursor]) {
+                        ',' => {
+                            self.cursor += 1;
+                            try self.skipWhiteSpace();
+                            if (self.cursor >= self.input.len) return null;
+                            switch (self.input[self.cursor]) {
+                                '{' => {
+                                    self.valueStart = self.cursor;
+                                    self.cursor += 1;
+                                    self.stack = 1;
+                                    self.state = .phantomStruct;
+                                    continue :stateLoop;
+                                },
+                                ',' => return Error.EmptyCommaSplit,
+                                else => return Error.SyntaxError,
+                            }
+                        },
+                        else => return Error.SyntaxError,
+                    }
                 },
                 .post1dValue => {
                     if (self.cursor >= self.input.len) return null;
@@ -296,42 +391,45 @@ pub const AtDepthArrayTokenizer = struct {
                     }
                 },
                 .string => {
-                    while (self.cursor < self.input.len) : (self.cursor += 1) {
-                        switch (self.input[self.cursor]) {
-                            '\'' => {
-                                const slice = self.takeValueSlice();
-                                self.state = .postValue;
-                                self.cursor += 1;
-                                return slice;
-                            },
-                            else => continue,
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        if (input[cursor] == self.quote) {
+                            const slice = self.sliceTo(cursor);
+                            self.state = .postValue;
+                            cursor += 1;
+                            return slice;
                         }
                     }
                     return Error.EarlyQuoteTermination;
                 },
                 .subArrayString => {
-                    while (self.cursor < self.input.len) : (self.cursor += 1) {
-                        switch (self.input[self.cursor]) {
-                            '\'' => {
-                                self.state = .subArrayAnyValue;
-                                self.cursor += 1;
-                                continue :stateLoop;
-                            },
-                            else => continue,
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        if (input[cursor] == self.quote) {
+                            self.state = .subArrayAnyValue;
+                            cursor += 1;
+                            continue :stateLoop;
                         }
                     }
                     return Error.EarlyQuoteTermination;
                 },
                 .anyValue => {
-                    while (self.cursor < self.input.len) : (self.cursor += 1) {
-                        switch (self.input[self.cursor]) {
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        switch (input[cursor]) {
                             ']' => {
-                                const slice = self.takeValueSlice();
+                                const slice = self.sliceTo(cursor);
                                 self.state = .postValue;
                                 return slice;
                             },
                             '\t', ' ', ',' => {
-                                const slice = self.takeValueSlice();
+                                const slice = self.sliceTo(cursor);
                                 self.state = .postValue;
                                 return slice;
                             },
@@ -339,39 +437,329 @@ pub const AtDepthArrayTokenizer = struct {
                                 self.stack += 1;
                                 continue;
                             },
-                            '\'', '\n', '\r', '"' => return Error.SyntaxError,
+                            '\'', '\n', '\r', '"', '{', '}' => return Error.SyntaxError,
                             else => continue,
                         }
                     }
                     return Error.UnexpectedEndOfInput;
                 },
                 .subArrayAnyValue => {
-                    while (self.cursor < self.input.len) : (self.cursor += 1) {
-                        switch (self.input[self.cursor]) {
-                            ']' => {
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        switch (input[cursor]) {
+                            ']', '}' => {
                                 if (self.stack >= 2) self.stack -= 1;
                                 if (self.stack == 1) {
-                                    self.cursor += 1;
-                                    const slice = self.takeValueSlice();
+                                    cursor += 1;
+                                    const slice = self.sliceTo(cursor);
                                     self.state = .postValue;
                                     return slice;
                                 }
                                 continue;
                             },
-                            '\'' => {
+                            '\'', '"' => |quote| {
+                                self.quote = quote;
                                 self.state = .subArrayString;
-                                self.cursor += 1;
+                                cursor += 1;
                                 continue :stateLoop;
                             },
-                            '[' => {
+                            '[', '{' => {
                                 self.stack += 1;
                                 continue;
                             },
-                            '\n', '\r', '"' => return Error.SyntaxError,
+                            '\n', '\r' => return Error.SyntaxError,
                             else => continue,
                         }
                     }
                     return Error.UnexpectedEndOfInput;
+                },
+            }
+        }
+    }
+};
+
+pub const AtDepthStructTokenizer = struct {
+    input: []const u8,
+    cursor: usize = 0,
+    valueStart: usize = 0,
+    state: State = .noop,
+    stack: usize = 0,
+    quote: u8 = '\'',
+    key: []const u8 = "",
+
+    pub fn init(input: []const u8) @This() {
+        return .{
+            .input = input,
+        };
+    }
+
+    pub const Field = struct {
+        key: []const u8,
+        value: []const u8,
+    };
+
+    pub const Error = error{
+        MissingStructLayer,
+        EmptyCommaSplit,
+        MissingKey,
+        MissingKeyValueSeparator,
+        MissingValue,
+        EarlyQuoteTermination,
+        UnsupportedBreakline,
+        UnexpectedEndOfInput,
+        SyntaxError,
+    };
+
+    const State = enum {
+        noop,
+        key,
+        keyString,
+        anyKey,
+        separator,
+        value,
+        string,
+        anyValue,
+        subValue,
+        subValueString,
+        postValue,
+        done,
+    };
+
+    pub fn skipWhiteSpace(self: *@This()) Error!void {
+        const input = self.input;
+        var cursor = self.cursor;
+        defer self.cursor = cursor;
+        while (cursor < input.len) : (cursor += 1) {
+            switch (input[cursor]) {
+                ' ', '\t' => continue,
+                '\r', '\n' => return Error.UnsupportedBreakline,
+                else => return,
+            }
+        }
+    }
+
+    pub fn expectPeek(self: *@This()) Error!u8 {
+        if (self.cursor < self.input.len) return self.input[self.cursor];
+        return Error.UnexpectedEndOfInput;
+    }
+
+    pub fn skipWhiteSpaceExpectByte(self: *@This()) Error!u8 {
+        try self.skipWhiteSpace();
+        return try self.expectPeek();
+    }
+
+    pub fn sliceTo(self: *@This(), end: usize) []const u8 {
+        const slice = self.input[self.valueStart..end];
+        self.valueStart = end;
+        return slice;
+    }
+
+    pub fn takeValueSlice(self: *@This()) []const u8 {
+        const slice = self.input[self.valueStart..self.cursor];
+        self.valueStart = self.cursor;
+        return slice;
+    }
+
+    fn field(self: *@This(), value: []const u8) Field {
+        self.state = .postValue;
+        return .{
+            .key = self.key,
+            .value = value,
+        };
+    }
+
+    pub fn next(self: *@This()) Error!?Field {
+        stateLoop: while (true) {
+            switch (self.state) {
+                .noop => {
+                    try self.skipWhiteSpace();
+                    if (self.cursor >= self.input.len) return Error.MissingStructLayer;
+                    switch (self.input[self.cursor]) {
+                        '{' => {
+                            self.cursor += 1;
+                            self.stack += 1;
+                            self.state = .key;
+                            continue :stateLoop;
+                        },
+                        else => return Error.MissingStructLayer,
+                    }
+                },
+                .key => {
+                    switch (try self.skipWhiteSpaceExpectByte()) {
+                        '}' => {
+                            self.cursor += 1;
+                            self.stack -= 1;
+                            self.state = .done;
+                            continue :stateLoop;
+                        },
+                        ',' => return Error.EmptyCommaSplit,
+                        ':' => return Error.MissingKey,
+                        '\'', '"' => |quote| {
+                            self.quote = quote;
+                            self.cursor += 1;
+                            self.valueStart = self.cursor;
+                            self.state = .keyString;
+                            continue :stateLoop;
+                        },
+                        '[', ']', '{' => return Error.SyntaxError,
+                        else => {
+                            self.valueStart = self.cursor;
+                            self.state = .anyKey;
+                            continue :stateLoop;
+                        },
+                    }
+                },
+                .keyString => {
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        if (input[cursor] == self.quote) {
+                            self.key = self.sliceTo(cursor);
+                            cursor += 1;
+                            self.state = .separator;
+                            continue :stateLoop;
+                        }
+                    }
+                    return Error.EarlyQuoteTermination;
+                },
+                .anyKey => {
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        switch (input[cursor]) {
+                            ':', ' ', '\t' => {
+                                self.key = self.sliceTo(cursor);
+                                self.state = .separator;
+                                continue :stateLoop;
+                            },
+                            '[', ']', '{', '}', ',', '\'', '"', '\n', '\r' => return Error.SyntaxError,
+                            else => continue,
+                        }
+                    }
+                    return Error.UnexpectedEndOfInput;
+                },
+                .separator => {
+                    switch (try self.skipWhiteSpaceExpectByte()) {
+                        ':' => {
+                            self.cursor += 1;
+                            self.state = .value;
+                            continue :stateLoop;
+                        },
+                        else => return Error.MissingKeyValueSeparator,
+                    }
+                },
+                .value => {
+                    switch (try self.skipWhiteSpaceExpectByte()) {
+                        ',', '}' => return Error.MissingValue,
+                        ']', ':' => return Error.SyntaxError,
+                        '\'', '"' => |quote| {
+                            self.quote = quote;
+                            self.cursor += 1;
+                            self.valueStart = self.cursor;
+                            self.state = .string;
+                            continue :stateLoop;
+                        },
+                        '[', '{' => {
+                            self.valueStart = self.cursor;
+                            self.cursor += 1;
+                            self.stack += 1;
+                            self.state = .subValue;
+                            continue :stateLoop;
+                        },
+                        else => {
+                            self.valueStart = self.cursor;
+                            self.state = .anyValue;
+                            continue :stateLoop;
+                        },
+                    }
+                },
+                .string => {
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        if (input[cursor] == self.quote) {
+                            const slice = self.sliceTo(cursor);
+                            cursor += 1;
+                            return self.field(slice);
+                        }
+                    }
+                    return Error.EarlyQuoteTermination;
+                },
+                .anyValue => {
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        switch (input[cursor]) {
+                            ',', '}', ' ', '\t' => return self.field(self.sliceTo(cursor)),
+                            '[', ']', '{', '\'', '"', '\n', '\r' => return Error.SyntaxError,
+                            else => continue,
+                        }
+                    }
+                    return Error.UnexpectedEndOfInput;
+                },
+                .subValue => {
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        switch (input[cursor]) {
+                            '[', '{' => self.stack += 1,
+                            ']', '}' => {
+                                self.stack -= 1;
+                                if (self.stack == 1) {
+                                    cursor += 1;
+                                    return self.field(self.sliceTo(cursor));
+                                }
+                            },
+                            '\'', '"' => |quote| {
+                                self.quote = quote;
+                                cursor += 1;
+                                self.state = .subValueString;
+                                continue :stateLoop;
+                            },
+                            '\n', '\r' => return Error.SyntaxError,
+                            else => continue,
+                        }
+                    }
+                    return Error.UnexpectedEndOfInput;
+                },
+                .subValueString => {
+                    const input = self.input;
+                    var cursor = self.cursor;
+                    defer self.cursor = cursor;
+                    while (cursor < input.len) : (cursor += 1) {
+                        if (input[cursor] == self.quote) {
+                            cursor += 1;
+                            self.state = .subValue;
+                            continue :stateLoop;
+                        }
+                    }
+                    return Error.EarlyQuoteTermination;
+                },
+                .postValue => {
+                    switch (try self.skipWhiteSpaceExpectByte()) {
+                        ',' => {
+                            self.cursor += 1;
+                            self.state = .key;
+                            continue :stateLoop;
+                        },
+                        '}' => {
+                            self.state = .key;
+                            continue :stateLoop;
+                        },
+                        else => return Error.SyntaxError,
+                    }
+                },
+                .done => {
+                    try self.skipWhiteSpace();
+                    if (self.cursor < self.input.len) return Error.SyntaxError;
+                    return null;
                 },
             }
         }
@@ -831,4 +1219,157 @@ test "Any depth any match tricky cases" {
 
     const expectTricky7: []const []const u8 = &.{ "1", "2", "3, [4, 5]" };
     try t.expectEqualDeep(expectTricky7, try tstCollectTokens(allocator, "[1, 2, '3, [4, 5]']"));
+}
+
+fn tstCollectFields(allocator: *const Allocator, slice: []const u8) ![]const AtDepthStructTokenizer.Field {
+    var result = try std.ArrayListUnmanaged(AtDepthStructTokenizer.Field).initCapacity(allocator.*, 8);
+    var tokenizer = AtDepthStructTokenizer.init(slice);
+
+    while (try tokenizer.next()) |item| {
+        try result.append(allocator.*, item);
+    }
+
+    return result.toOwnedSlice(allocator.*);
+}
+
+test "Array tokenizer double quotes and nested structs" {
+    const t = std.testing;
+    const E = AtDepthArrayTokenizer.Error;
+    const base = &std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base.*);
+    defer arena.deinit();
+    const allocator = &arena.allocator();
+
+    const expectTwo: []const []const u8 = &.{ "a", "b" };
+    try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "[\"a\", \"b\"]"));
+    try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "[\"a\", 'b']"));
+
+    const expectMixedQuotes: []const []const u8 = &.{ "it's", "say \"hi\"" };
+    try t.expectEqualDeep(expectMixedQuotes, try tstCollectTokens(allocator, "[\"it's\", 'say \"hi\"']"));
+
+    const expectNestedQuoted: []const []const u8 = &.{ "[\"a]\", 'b']", "[\"c\"]" };
+    try t.expectEqualDeep(expectNestedQuoted, try tstCollectTokens(allocator, "[[\"a]\", 'b'], [\"c\"]]"));
+
+    const expectStructs: []const []const u8 = &.{ "{\"a\": 1}", "{\"a\": [1, 2], \"b\": {\"c\": \"}\"}}", "{}" };
+    try t.expectEqualDeep(expectStructs, try tstCollectTokens(allocator, "[{\"a\": 1}, {\"a\": [1, 2], \"b\": {\"c\": \"}\"}}, {}]"));
+
+    try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, "\"a\""));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "}"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "1,{"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "[1}"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "[\"a\"b]"));
+    try t.expectError(E.EarlyQuoteTermination, tstCollectTokens(allocator, "[\"a]"));
+    try t.expectError(E.EarlyQuoteTermination, tstCollectTokens(allocator, "[{\"a]}"));
+    try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "[{\"a\": 1]"));
+}
+
+test "Struct tokenizer" {
+    const t = std.testing;
+    const E = AtDepthStructTokenizer.Error;
+    const F = AtDepthStructTokenizer.Field;
+    const base = &std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base.*);
+    defer arena.deinit();
+    const allocator = &arena.allocator();
+
+    const expectEmpty: []const F = &.{};
+    try t.expectEqualDeep(expectEmpty, try tstCollectFields(allocator, "{}"));
+    try t.expectEqualDeep(expectEmpty, try tstCollectFields(allocator, " { \t } "));
+
+    const expectOne: []const F = &.{.{ .key = "a", .value = "1" }};
+    try t.expectEqualDeep(expectOne, try tstCollectFields(allocator, "{\"a\": 1}"));
+    try t.expectEqualDeep(expectOne, try tstCollectFields(allocator, "{'a':1}"));
+    try t.expectEqualDeep(expectOne, try tstCollectFields(allocator, "{a: 1}"));
+    try t.expectEqualDeep(expectOne, try tstCollectFields(allocator, "{ a : 1 }"));
+    try t.expectEqualDeep(expectOne, try tstCollectFields(allocator, "{\ta\t:\t1\t}"));
+    try t.expectEqualDeep(expectOne, try tstCollectFields(allocator, "{\"a\": \"1\"}"));
+    try t.expectEqualDeep(expectOne, try tstCollectFields(allocator, "{\"a\": 1,}"));
+    try t.expectEqualDeep(expectOne, try tstCollectFields(allocator, "{\"a\": 1 , }"));
+
+    const expectStrings: []const F = &.{
+        .{ .key = "a b", .value = " x, y } " },
+        .{ .key = "c", .value = "it's" },
+        .{ .key = "d", .value = "" },
+    };
+    try t.expectEqualDeep(expectStrings, try tstCollectFields(allocator, "{\"a b\": ' x, y } ', \"c\": \"it's\", d: ''}"));
+
+    const expectBareValues: []const F = &.{
+        .{ .key = "url", .value = "http://x" },
+        .{ .key = "n", .value = "-1.5" },
+        .{ .key = "o", .value = "null" },
+        .{ .key = "is-on", .value = "true" },
+    };
+    try t.expectEqualDeep(expectBareValues, try tstCollectFields(allocator, "{url: http://x, n: -1.5, o: null, is-on: true}"));
+
+    const expectNested: []const F = &.{
+        .{ .key = "a", .value = "[1, [2, 3]]" },
+        .{ .key = "b", .value = "{\"c\": {\"d\": ']}'}, \"e\": [\"}\"]}" },
+        .{ .key = "f", .value = "[]" },
+        .{ .key = "g", .value = "{}" },
+    };
+    try t.expectEqualDeep(expectNested, try tstCollectFields(allocator, "{\"a\": [1, [2, 3]], \"b\": {\"c\": {\"d\": ']}'}, \"e\": [\"}\"]}, \"f\": [], \"g\": {}}"));
+
+    try t.expectError(E.MissingStructLayer, tstCollectFields(allocator, ""));
+    try t.expectError(E.MissingStructLayer, tstCollectFields(allocator, " "));
+    try t.expectError(E.MissingStructLayer, tstCollectFields(allocator, "a: 1"));
+    try t.expectError(E.MissingStructLayer, tstCollectFields(allocator, "[{a: 1}]"));
+    try t.expectError(E.UnexpectedEndOfInput, tstCollectFields(allocator, "{"));
+    try t.expectError(E.UnexpectedEndOfInput, tstCollectFields(allocator, "{a"));
+    try t.expectError(E.UnexpectedEndOfInput, tstCollectFields(allocator, "{a:"));
+    try t.expectError(E.UnexpectedEndOfInput, tstCollectFields(allocator, "{a: 1"));
+    try t.expectError(E.UnexpectedEndOfInput, tstCollectFields(allocator, "{a: 1,"));
+    try t.expectError(E.UnexpectedEndOfInput, tstCollectFields(allocator, "{a: [1}"));
+    try t.expectError(E.UnexpectedEndOfInput, tstCollectFields(allocator, "{a: {b: 1}"));
+    try t.expectError(E.EarlyQuoteTermination, tstCollectFields(allocator, "{\"a: 1}"));
+    try t.expectError(E.EarlyQuoteTermination, tstCollectFields(allocator, "{a: 'x}"));
+    try t.expectError(E.EarlyQuoteTermination, tstCollectFields(allocator, "{a: [\"x]}"));
+    try t.expectError(E.EmptyCommaSplit, tstCollectFields(allocator, "{,}"));
+    try t.expectError(E.EmptyCommaSplit, tstCollectFields(allocator, "{a: 1,,}"));
+    try t.expectError(E.EmptyCommaSplit, tstCollectFields(allocator, "{a: 1, , b: 2}"));
+    try t.expectError(E.MissingKey, tstCollectFields(allocator, "{: 1}"));
+    try t.expectError(E.MissingKeyValueSeparator, tstCollectFields(allocator, "{a 1}"));
+    try t.expectError(E.MissingKeyValueSeparator, tstCollectFields(allocator, "{\"a\" 1}"));
+    try t.expectError(E.MissingKeyValueSeparator, tstCollectFields(allocator, "{\"a\"}"));
+    try t.expectError(E.MissingValue, tstCollectFields(allocator, "{a:}"));
+    try t.expectError(E.MissingValue, tstCollectFields(allocator, "{a: , b: 1}"));
+    try t.expectError(E.SyntaxError, tstCollectFields(allocator, "{a: 1 b: 2}"));
+    try t.expectError(E.SyntaxError, tstCollectFields(allocator, "{a: 1} x"));
+    try t.expectError(E.SyntaxError, tstCollectFields(allocator, "{a: 1}}"));
+    try t.expectError(E.SyntaxError, tstCollectFields(allocator, "{a: 1]"));
+    try t.expectError(E.SyntaxError, tstCollectFields(allocator, "{a: x'y}"));
+    try t.expectError(E.SyntaxError, tstCollectFields(allocator, "{a: 'x'y}"));
+    try t.expectError(E.SyntaxError, tstCollectFields(allocator, "{[a]: 1}"));
+    try t.expectError(E.SyntaxError, tstCollectFields(allocator, "{a,b: 1}"));
+    try t.expectError(E.UnsupportedBreakline, tstCollectFields(allocator, "{a: 1,\n b: 2}"));
+}
+
+test "Array tokenizer phantom structs" {
+    const t = std.testing;
+    const E = AtDepthArrayTokenizer.Error;
+    const base = &std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base.*);
+    defer arena.deinit();
+    const allocator = &arena.allocator();
+
+    const expectOne: []const []const u8 = &.{"{\"a\": 1}"};
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "{\"a\": 1}"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, " \t{\"a\": 1} \t"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "{\"a\": 1},"));
+    try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "{\"a\": 1} , "));
+
+    const expectMany: []const []const u8 = &.{ "{x: 1, y: 2}", "{x: [3, {z: '}'}], s: \"a,b}\"}", "{}" };
+    try t.expectEqualDeep(expectMany, try tstCollectTokens(allocator, "{x: 1, y: 2},{x: [3, {z: '}'}], s: \"a,b}\"}, {}"));
+    try t.expectEqualDeep(expectMany, try tstCollectTokens(allocator, " {x: 1, y: 2} ,\t{x: [3, {z: '}'}], s: \"a,b}\"} , {} , "));
+
+    try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "{x: 1"));
+    try t.expectError(E.UnexpectedEndOfInput, tstCollectTokens(allocator, "{x: 1}, {y: [2}"));
+    try t.expectError(E.EarlyQuoteTermination, tstCollectTokens(allocator, "{x: 'a}"));
+    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "{x: 1},,{x: 2}"));
+    try t.expectError(E.EmptyCommaSplit, tstCollectTokens(allocator, "{x: 1}, , {x: 2}"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "{x: 1} {x: 2}"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "{x: 1}, 2"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "{x: 1}, [2]"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "1, {x: 1}"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "{x: 1}]"));
+    try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "{x: 1,\n y: 2}"));
 }

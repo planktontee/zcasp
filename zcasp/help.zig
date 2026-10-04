@@ -3,7 +3,8 @@ const regent = @import("regent");
 const coll = regent.collections;
 const PositionalOf = @import("positionals.zig").PositionalOf;
 const meta = regent.meta;
-const GroupMatchConfig = @import("validate.zig").GroupMatchConfig;
+const validate = @import("validate.zig");
+const GroupMatchConfig = validate.GroupMatchConfig;
 const DefaultPosT = @import("spec.zig").defaultPositionals();
 const btType = std.builtin.Type;
 
@@ -18,51 +19,74 @@ pub const HelpConf = struct {
     maxLineLen: usize = 120,
 };
 
+fn breakPiece(comptime text: []const u8, comptime budget: usize) []const u8 {
+    return comptime rt: {
+        if (budget == 0) @compileError("maxLineLen leaves no room for text after padding");
+        var piece: []const u8 = text[0..@min(budget, text.len)];
+        if (piece.len > 0 and piece[piece.len - 1] != ' ' and piece.len != text.len)
+            if (std.mem.lastIndexOfScalar(u8, piece, ' ')) |idx| {
+                piece = text[0 .. idx + 1];
+            };
+        break :rt piece;
+    };
+}
+
+fn appendWrapped(
+    comptime b: *coll.ComptSb,
+    comptime maxLineLen: usize,
+    comptime text: []const u8,
+    comptime firstBudget: usize,
+    comptime padding: []const u8,
+) void {
+    comptime {
+        var reminder = text;
+        // this refers to how the line starts
+        // which needs to be changed later
+        var budget = firstBudget;
+        while (true) {
+            const piece = breakPiece(reminder, budget);
+            b.append(piece);
+            reminder = reminder[piece.len..];
+            if (reminder.len == 0) break;
+            b.appendAll(.{ "\n", padding });
+            budget = maxLineLen -| padding.len;
+        }
+    }
+}
+
+fn appendPaddedLines(
+    comptime b: *coll.ComptSb,
+    comptime maxLineLen: usize,
+    comptime text: []const u8,
+    comptime firstBudget: usize,
+    comptime padding: []const u8,
+) void {
+    comptime {
+        var iter = std.mem.splitScalar(u8, text, '\n');
+        // Same as above, refers to how the line starts
+        var budget = firstBudget;
+        var first = true;
+        while (iter.next()) |line| {
+            if (!first) b.appendAll(.{ "\n", padding });
+            first = false;
+            appendWrapped(b, maxLineLen, line, budget, padding);
+            budget = maxLineLen -| padding.len;
+        }
+    }
+}
+
 pub fn formatBlob(maxLineLen: usize, text: []const u8, delimiter: usize, indent: usize) []const u8 {
     return comptime rt: {
         var b = coll.ComptSb.init("");
-
         const padding: [delimiter + indent]u8 = @splat(' ');
-        var iter = std.mem.splitAny(
-            u8,
-            text,
-            "\n",
-        );
-        while (iter.next()) |slice| {
-            var reminder = slice;
-            // First slice has no padding
-            {
-                const sliceTarget = @min(maxLineLen, reminder.len);
-                var targetPiece: []const u8 = reminder[0..sliceTarget];
-                if (targetPiece.len > 0 and targetPiece[targetPiece.len - 1] != ' ' and targetPiece.len != reminder.len)
-                    if (std.mem.lastIndexOfScalar(u8, targetPiece, ' ')) |idx| {
-                        targetPiece = reminder[0 .. idx + 1];
-                    };
-                b.appendAll(.{
-                    targetPiece,
-                    "\n",
-                });
-                reminder = reminder[targetPiece.len..];
-            }
-
-            while (reminder.len > 0) {
-                const sliceTarget = @min(maxLineLen - padding.len, reminder.len);
-                var targetPiece: []const u8 = reminder[0..sliceTarget];
-                if (targetPiece.len > 0 and targetPiece[targetPiece.len - 1] != ' ' and targetPiece.len != reminder.len)
-                    if (std.mem.lastIndexOfScalar(u8, targetPiece, ' ')) |idx| {
-                        targetPiece = reminder[0 .. idx + 1];
-                    };
-
-                b.appendAll(.{
-                    padding,
-                    targetPiece,
-                    "\n",
-                });
-                reminder = reminder[targetPiece.len..];
-            }
+        var iter = std.mem.splitScalar(u8, text, '\n');
+        var first = true;
+        while (iter.next()) |line| {
+            if (!first) b.append("\n");
+            first = false;
+            appendWrapped(b, maxLineLen, line, maxLineLen, &padding);
         }
-
-        break :rt b.s[0 .. b.s.len - 1];
+        break :rt b.s;
     };
 }
 
@@ -76,8 +100,23 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             break :rt Spec.Help;
         } else .{};
         const Verb = if (@hasDecl(Spec, "Verb")) Spec.Verb else void;
-        const GroupMatch: GroupMatchConfig(Spec) = if (@hasDecl(Spec, "GroupMatch")) Spec.GroupMatch else .{};
+        const mandatoryVerb: bool = if (@hasDecl(Spec, "GroupMatch"))
+            Spec.GroupMatch.mandatoryVerb
+        else
+            false;
         const INDENT: [conf.indent]u8 = @splat(' ');
+
+        fn appendEntry(
+            comptime b: *coll.ComptSb,
+            comptime text: []const u8,
+            comptime firstBudget: usize,
+            comptime padding: []const u8,
+        ) void {
+            comptime if (conf.leftAlignment)
+                appendPaddedLines(b, conf.maxLineLen, text, firstBudget, padding)
+            else
+                b.append(text);
+        }
 
         pub fn usage() ?[]const u8 {
             return comptime rt: {
@@ -165,28 +204,27 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                 if (enumFields.len == 0) break :rt null;
 
                 const columDelim = columnDelimiter(enumFields);
+                const padding: [conf.indent + columDelim]u8 = @splat(' ');
 
                 var b = coll.ComptSb.init("Commands:");
-                if (GroupMatch.mandatoryVerb) b.append(" [Required]");
+                if (mandatoryVerb) b.append(" [Required]");
 
                 b.appendAll(.{ "\n", conf.headerDelimiter });
                 for (enumFields, 0..) |f, i| {
-                    b.appendAll(.{ INDENT, f.name });
+                    var line = coll.ComptSb.initTup(.{ INDENT, f.name });
 
                     if (verbShortDesc(f.name)) |verbDesc| {
-                        b.appendAll(.{
+                        line.appendAll(.{
                             @as([columDelim - f.name.len]u8, @splat(' ')),
                             verbDesc,
                         });
                     }
 
+                    appendEntry(b, line.s, conf.maxLineLen, &padding);
                     if (i != enumFields.len - 1) b.append("\n");
                 }
 
-                break :rt if (conf.leftAlignment)
-                    formatBlob(conf.maxLineLen, b.s, columDelim, conf.indent)
-                else
-                    b.s;
+                break :rt b.s;
             };
         }
 
@@ -202,7 +240,11 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             };
         }
 
-        pub fn formatStruct(comptime T: type, comptime defaultValue: T) []const u8 {
+        pub fn formatStruct(
+            comptime T: type,
+            comptime defaultValue: T,
+            comptime u8AsChar: bool,
+        ) []const u8 {
             return comptime rv: {
                 const fields = std.meta.fields(T);
                 var b = coll.ComptSb.initTup(.{
@@ -223,7 +265,7 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                         field.name,
                         if (conf.simpleTypes) "\"" else "",
                         if (conf.simpleTypes) ": " else " = ",
-                        formatDefaultValue(field.type, @field(defaultValue, field.name)),
+                        formatDefaultValue(field.type, @field(defaultValue, field.name), u8AsChar),
                     });
 
                     if (i < fields.len - 1) addComma = true;
@@ -233,7 +275,12 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             };
         }
 
-        pub fn formatDefaultArray(comptime T: type, comptime arr: anytype, comptime defaultValue: T) []const u8 {
+        pub fn formatDefaultArray(
+            comptime T: type,
+            comptime arr: anytype,
+            comptime defaultValue: T,
+            comptime u8AsChar: bool,
+        ) []const u8 {
             return comptime rv: {
                 if (arr.child == u8) {
                     var b = coll.ComptSb.init("\"");
@@ -247,7 +294,7 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
 
                 var b = coll.ComptSb.init(if (conf.simpleTypes) "[" else "{");
                 for (defaultValue, 0..) |value, i| {
-                    b.append(formatDefaultValue(arr.child, value));
+                    b.append(formatDefaultValue(arr.child, value, u8AsChar));
                     if (i < defaultValue.len - 1) {
                         b.append(", ");
                     }
@@ -269,10 +316,14 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             };
         }
 
-        pub fn formatDefaultValue(comptime T: type, comptime defaultValue: T) []const u8 {
+        pub fn formatDefaultValue(
+            comptime T: type,
+            comptime defaultValue: T,
+            comptime u8AsChar: bool,
+        ) []const u8 {
             return comptime switch (@typeInfo(T)) {
                 .int,
-                => if (T == u8)
+                => if (T == u8 and u8AsChar)
                     std.fmt.comptimePrint(
                         "'{s}'",
                         .{translateChar(defaultValue)},
@@ -288,20 +339,21 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                 ),
                 .bool => std.fmt.comptimePrint("{any}", .{defaultValue}),
                 .pointer => |ptr| rv: {
-                    if (ptr.size == .one) @compileLog(std.fmt.comptimePrint(
+                    if (ptr.size == .one) @compileError(std.fmt.comptimePrint(
                         "Unsupported ptr type {s}",
                         .{@typeName(T)},
                     ));
 
-                    break :rv formatDefaultArray(T, ptr, defaultValue);
+                    break :rv formatDefaultArray(T, ptr, defaultValue, u8AsChar);
                 },
-                .array => |arr| formatDefaultArray(T, arr, defaultValue),
+                .array => |arr| formatDefaultArray(T, arr, defaultValue, u8AsChar),
                 .optional => |opt| if (defaultValue == null) "null" else formatDefaultValue(
                     opt.child,
                     defaultValue.?,
+                    u8AsChar,
                 ),
                 .@"enum" => formatType(T) ++ "." ++ @tagName(defaultValue),
-                .@"struct" => formatStruct(T, defaultValue),
+                .@"struct" => formatStruct(T, defaultValue, u8AsChar),
                 .@"union" => switch (defaultValue) {
                     inline else => |e| coll.ComptSb.initTup(.{
                         if (conf.simpleTypes) "" else formatType(T),
@@ -311,7 +363,7 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                         @tagName(defaultValue),
                         if (conf.simpleTypes) "\"" else "",
                         if (conf.simpleTypes) ": " else " = ",
-                        formatStruct(@TypeOf(e), e),
+                        formatStruct(@TypeOf(e), e, u8AsChar),
                         " }",
                     }).s,
                 },
@@ -341,13 +393,13 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             };
         }
 
-        pub fn simpleTypeTranslation(comptime T: type) []const u8 {
+        pub fn simpleTypeTranslation(comptime T: type, comptime u8AsChar: bool) []const u8 {
             return comptime rt: {
                 var b = coll.ComptSb.init("");
                 var Tt = T;
                 rfd: switch (@typeInfo(Tt)) {
                     .int => {
-                        if (Tt == u8)
+                        if (Tt == u8 and u8AsChar)
                             b.append("char")
                         else
                             b.append("int");
@@ -405,8 +457,11 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             };
         }
 
-        pub fn translateType(comptime T: type) []const u8 {
-            return comptime if (conf.simpleTypes) simpleTypeTranslation(T) else zigTypeTranslation(T);
+        pub fn translateType(comptime T: type, comptime u8AsChar: bool) []const u8 {
+            return comptime if (conf.simpleTypes)
+                simpleTypeTranslation(T, u8AsChar)
+            else
+                zigTypeTranslation(T);
         }
 
         pub fn typeHint(
@@ -419,14 +474,14 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                     if (!desc.typeHint and !desc.defaultHint) break :rt null;
 
                     var b = coll.ComptSb.init("(");
-                    if (desc.typeHint) b.append(translateType(field.type));
+                    if (desc.typeHint) b.append(translateType(field.type, desc.u8AsChar));
 
                     if (desc.typeHint and desc.defaultHint and !meta.isUndefined(field)) {
                         b.append(" = ");
                     }
 
                     if (desc.defaultHint and !meta.isUndefined(field)) {
-                        b.append(formatDefaultValue(field.type, field.defaultValue().?));
+                        b.append(formatDefaultValue(field.type, field.defaultValue().?, desc.u8AsChar));
                     }
                     b.append(")");
                     break :rt b.s;
@@ -465,34 +520,33 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
 
                 var b = coll.ComptSb.initTup(.{ "Options:\n", conf.headerDelimiter });
                 const columDelim = columnDelimiter(optionPieces);
+                const padding: [conf.indent + columDelim]u8 = @splat(' ');
                 const innerBlock: [conf.indent * 2]u8 = @splat(' ');
 
                 for (fields, &optionPieces, 0..) |field, optionPiece, i| {
                     defer if (i < fields.len - 1) b.append("\n");
-                    b.appendAll(.{ INDENT, optionPiece });
-                    if (Help.optionsDescription == null) continue;
+                    const head = INDENT ++ optionPiece;
 
-                    const optI = optIdx.get(field.name) orelse continue;
+                    const optI = (if (Help.optionsDescription == null) null else optIdx.get(field.name)) orelse {
+                        appendEntry(b, head, conf.maxLineLen, &padding);
+                        continue;
+                    };
                     const desc = Help.optionsDescription.?[optI];
 
-                    const displacement: []const u8 = if (conf.optionsBreakline) "\n" ++ innerBlock else &@as(
-                        [columDelim - optionPiece.len]u8,
-                        @splat(' '),
-                    );
-
                     if (desc.description) |vDesc| {
-                        b.appendAll(.{
-                            displacement,
-                            vDesc,
-                        });
-                    }
+                        if (conf.optionsBreakline) {
+                            appendEntry(b, head, conf.maxLineLen, &padding);
+                            b.appendAll(.{ "\n", innerBlock });
+                            appendEntry(b, vDesc, conf.maxLineLen -| innerBlock.len, &innerBlock);
+                        } else {
+                            const displacement: [columDelim - optionPiece.len]u8 = @splat(' ');
+                            appendEntry(b, head ++ displacement ++ vDesc, conf.maxLineLen, &padding);
+                        }
+                    } else appendEntry(b, head, conf.maxLineLen, &padding);
 
                     if (conf.optionsBreakline and i < fields.len - 1) b.append("\n");
                 }
-                break :rt if (conf.leftAlignment)
-                    formatBlob(conf.maxLineLen, b.s, columDelim, conf.indent)
-                else
-                    b.s;
+                break :rt b.s;
             };
         }
 
@@ -515,7 +569,7 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                     for (std.meta.fields(PosT.TupleT)) |field| {
                         typePieces[pieceIdx] = coll.ComptSb.initTup(.{
                             "<",
-                            translateType(field.type),
+                            translateType(field.type, true),
                             ">",
                         }).s;
                         pieceIdx += 1;
@@ -524,11 +578,12 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                 if (PosT.ReminderT != void) {
                     typePieces[pieceIdx] = coll.ComptSb.initTup(.{
                         "<",
-                        translateType(PosT.ReminderT),
+                        translateType(PosT.ReminderT, true),
                         ">",
                     }).s;
                 }
                 const columDelim = columnDelimiter(typePieces);
+                const padding: [conf.indent + columDelim]u8 = @splat(' ');
 
                 if (PosT.TupleT != void) {
                     const fields = std.meta.fields(PosT.TupleT);
@@ -542,7 +597,7 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
 
                         const typePiece = typePieces[tupIdx];
 
-                        b.appendAll(.{
+                        var line = coll.ComptSb.initTup(.{
                             innerBlock,
                             typePiece,
                             &@as(
@@ -552,30 +607,29 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                             "[Required]",
                         });
 
-                        if (tupItemDesc) |desc| b.appendAll(.{
+                        if (tupItemDesc) |desc| line.appendAll(.{
                             " ",
                             desc,
                         });
+                        appendEntry(b, line.s, conf.maxLineLen, &padding);
                     }
                 }
 
                 if (PosT.ReminderT != void) {
                     if (PosT.TupleT != void) b.append("\n");
                     const rPiece = typePieces[typePieces.len - 1];
-                    b.appendAll(.{
+                    var line = coll.ComptSb.initTup(.{
                         innerBlock,
                         rPiece,
                     });
-                    if (posDec.reminder) |rDesc| b.appendAll(.{ &@as(
+                    if (posDec.reminder) |rDesc| line.appendAll(.{ &@as(
                         [columDelim - rPiece.len]u8,
                         @splat(' '),
                     ), rDesc });
+                    appendEntry(b, line.s, conf.maxLineLen, &padding);
                 }
 
-                break :rt if (conf.leftAlignment)
-                    formatBlob(conf.maxLineLen, b.s, columDelim, conf.indent)
-                else
-                    b.s;
+                break :rt b.s;
             };
         }
 
@@ -643,6 +697,7 @@ pub fn HelpData(T: type) type {
             defaultHint: bool = true,
             typeHint: bool = true,
             groupMatchHint: bool = true,
+            u8AsChar: bool = true,
         };
     };
 }
@@ -1393,6 +1448,117 @@ test "options struct" {
     }, .{ .headerDelimiter = "", .simpleTypes = true }).options().?);
 }
 
+test "options wrap alignment" {
+    const t = std.testing;
+    const Spec = struct {
+        a: i32 = undefined,
+        b: i32 = undefined,
+        pub const Help: HelpData(@This()) = .{
+            .optionsDescription = &.{
+                .{ .field = .a, .description = "one two three four" },
+                .{ .field = .b, .description = "first\nsecond line here" },
+            },
+        };
+    };
+
+    try t.expectEqualStrings(
+        \\Options:
+        \\  --a (i32)       one two 
+        \\                  three four
+        \\  --b (i32)       first
+        \\                  second line 
+        \\                  here
+    , HelpFmt(Spec, .{ .headerDelimiter = "", .maxLineLen = 30 }).options().?);
+
+    try t.expectEqualStrings(
+        \\Options:
+        \\  --a (i32)
+        \\    one two three 
+        \\    four
+        \\
+        \\  --b (i32)
+        \\    first
+        \\    second line here
+    , HelpFmt(Spec, .{ .headerDelimiter = "", .maxLineLen = 20, .optionsBreakline = true }).options().?);
+
+    try t.expectEqualStrings(
+        \\Options:
+        \\  --a (i32)       one two three four
+        \\  --b (i32)       first
+        \\second line here
+    , HelpFmt(Spec, .{ .headerDelimiter = "", .maxLineLen = 30, .leftAlignment = false }).options().?);
+}
+
+test "commands and positionals forced newline alignment" {
+    const t = std.testing;
+    const Spec = struct {
+        pub const Positionals = PositionalOf(.{
+            .TupleType = struct { i32 },
+        });
+        pub const A = struct {
+            pub const Help: HelpData(@This()) = .{ .shortDescription = "first\nsecond" };
+        };
+        pub const B = struct {
+            pub const Help: HelpData(@This()) = .{ .shortDescription = "x" };
+        };
+        pub const Verb = union(enum) { a: A, bb: B };
+        pub const Help: HelpData(@This()) = .{
+            .positionalsDescription = .{
+                .tuple = &.{"num\nmore about num"},
+                .reminder = "rest\nof it",
+            },
+        };
+    };
+
+    try t.expectEqualStrings(
+        \\Commands:
+        \\  a       first
+        \\          second
+        \\  bb      x
+    , HelpFmt(Spec, .{ .headerDelimiter = "" }).commands().?);
+
+    try t.expectEqualStrings(
+        \\Positionals:
+        \\  <i32>           [Required] num
+        \\                  more about num
+        \\  <?[][]u8>       rest
+        \\                  of it
+    , HelpFmt(Spec, .{ .headerDelimiter = "" }).positionals().?);
+}
+
+test "options u8 as char" {
+    const t = std.testing;
+    const Spec = struct {
+        c: u8 = 'a',
+        n: u8 = 'a',
+        cs: []const ?u8 = &.{ 'x', null },
+        ns: []const ?u8 = &.{ 'x', null },
+        pub const Help: HelpData(@This()) = .{
+            .optionsDescription = &.{
+                .{ .field = .c },
+                .{ .field = .n, .u8AsChar = false },
+                .{ .field = .cs },
+                .{ .field = .ns, .u8AsChar = false },
+            },
+        };
+    };
+
+    try t.expectEqualStrings(
+        \\Options:
+        \\  --c (u8 = 'a')
+        \\  --n (u8 = 97)
+        \\  --cs ([]?u8 = {'x', null})
+        \\  --ns ([]?u8 = {120, null})
+    , HelpFmt(Spec, .{ .headerDelimiter = "" }).options().?);
+    try t.expectEqualStrings(
+        \\Options:
+        \\  --c (char = 'a')
+        \\  --n (int = 97)
+        \\  --cs ([]?char = ['x', null])
+        \\  --ns ([]?int = [120, null])
+    , HelpFmt(Spec, .{ .headerDelimiter = "", .simpleTypes = true }).options().?);
+}
+
 test "groupmatch info" {
     const t = std.testing;
 
@@ -1452,21 +1618,6 @@ test "groupmatch info" {
         b6: u32 = undefined,
         b7: u32 = undefined,
         b8: u32 = undefined,
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
-            .mutuallyInclusive = &.{
-                &.{ .a1, .a2, .a6 },
-                &.{ .a1, .a3, .a7 },
-                &.{ .a4, .a5, .a8 },
-                &.{ .b1, .b5, .b8 },
-            },
-            .mutuallyExclusive = &.{
-                &.{ .a1, .a5, .a8 },
-                &.{ .b1, .b2, .b6 },
-                &.{ .b1, .b3, .b7 },
-                &.{ .b4, .b5, .b8 },
-            },
-            .required = &.{ .n1, .n2, .a1, .b1 },
-        };
         pub const Help: HelpData(@This()) = .{
             .optionsDescription = &.{
                 .{ .field = .n1, .typeHint = false, .defaultHint = false },
@@ -1500,9 +1651,6 @@ test "groupmatch info" {
     , HelpFmt(struct {
         n1: u32 = undefined,
         n2: u32 = undefined,
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
-            .required = &.{ .n1, .n2 },
-        };
         pub const Help: HelpData(@This()) = .{
             .optionsDescription = &.{
                 .{ .field = .n1, .description = "n1 desc", .typeHint = false, .defaultHint = false },
@@ -1600,9 +1748,6 @@ test "help" {
     , HelpFmt(struct {
         i1: i32 = 0,
         pub const Short = .{ .i = .i1 };
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
-            .required = &.{.i1},
-        };
         pub const Help: HelpData(@This()) = .{
             .usage = &.{"test [options] [commands] ..."},
             .description = "Some description about test",
@@ -1669,7 +1814,7 @@ test "help" {
             trace: Trace,
         };
         pub const Short = .{ .i = .i1 };
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
+        pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
             .mandatoryVerb = true,
         };
         pub const Help: HelpData(@This()) = .{
@@ -1718,7 +1863,7 @@ test "help" {
             trace: Trace,
         };
         pub const Short = .{ .i = .i1 };
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
+        pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
             .mandatoryVerb = true,
         };
         pub const Help: HelpData(@This()) = .{
@@ -1781,7 +1926,7 @@ test "help" {
             trace: Trace,
         };
         pub const Short = .{ .i = .i1 };
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
+        pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
             .mandatoryVerb = true,
         };
         pub const Help: HelpData(@This()) = .{
@@ -1845,7 +1990,7 @@ test "help" {
             trace: Trace,
         };
         pub const Short = .{ .i = .i1 };
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
+        pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
             .mandatoryVerb = true,
         };
         pub const Help: HelpData(@This()) = .{

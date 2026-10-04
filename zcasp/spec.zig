@@ -74,12 +74,12 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
         pub const VerbT = if (@hasDecl(Spec, "Verb")) SpecUnionVerbs() else void;
         const PosOf = if (@hasDecl(Spec, "Positionals")) Spec.Positionals else defaultPositionals();
         const SpecCodec = if (@hasDecl(Spec, "Codec")) Spec.Codec else ArgCodec(Spec);
-        const SpecTracker = T: {
-            if (@hasDecl(Spec, "GroupMatch")) break :T GroupTracker(Spec);
-            break :T GroupTrackerWithConfig(Spec, .{
+        const SpecTracker = if (@hasDecl(Spec, "GroupMatch"))
+            GroupTracker(Spec)
+        else
+            GroupTrackerWithConfig(Spec, GroupMatchConfig(Spec, {}){
                 .ensureCursorDone = true,
             });
-        };
         const SpecEnumFields = std.meta.FieldEnum(Spec);
         const ShortEnum = std.meta.FieldEnum(@TypeOf(Spec.Short));
 
@@ -97,7 +97,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                 SpecCodec.Error ||
                 PosOf.Error;
             errors = errors || if (VerbT != void) SpecVerbsErrors() else error{};
-            errors = errors || if (SpecTracker != void) validate.Error else error{};
+            errors = errors || if (SpecTracker != void) SpecTracker.ValidationError else error{};
             break :E errors;
         };
 
@@ -844,13 +844,34 @@ test "parse custom positionals" {
             .TupleType = struct { i32 },
             .ReminderType = void,
         });
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
+        pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
             .ensureCursorDone = false,
         };
     };
     const r2 = try tstParse(allocator, "program 2 ab 3", Spec2);
     try t.expectEqual(2, r2.positionals.tuple.@"0");
     try t.expectEqual({}, r2.positionals.reminder);
+}
+
+test "parse sized reminder must be exact" {
+    const t = std.testing;
+    const base = &t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base.*);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const Spec = struct {
+        pub const Positionals = PositionalOf(.{
+            .ReminderType = [2][]const u8,
+        });
+    };
+
+    const r1 = try tstParse(allocator, "program a b", Spec);
+    const expect: []const []const u8 = &.{ "a", "b" };
+    try t.expectEqualDeep(expect, &r1.positionals.reminder);
+    try t.expectError(Spec.Positionals.CollectError.ReminderBufferLongerThanArgs, tstParse(allocator, "program a", Spec));
+    try t.expectError(Spec.Positionals.CollectError.ReminderBufferLongerThanArgs, tstParse(allocator, "program", Spec));
+    try t.expectError(Spec.Positionals.Error.ReminderBufferShorterThanArgs, tstParse(allocator, "program a b c", Spec));
 }
 
 test "parse custom positionals with verb" {
@@ -867,14 +888,14 @@ test "parse custom positionals with verb" {
         });
         pub const Copy = struct {
             pub const Positionals = EmptyPositionalsOf;
-            pub const GroupMatch: GroupMatchConfig(@This()) = .{
+            pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
                 .ensureCursorDone = false,
             };
         };
         pub const Verb = union(enum) {
             copy: Copy,
         };
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
+        pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
             .ensureCursorDone = false,
         };
     };
@@ -914,11 +935,11 @@ test "parse verb" {
             paste: Paste,
         };
 
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
+        pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
             .mandatoryVerb = true,
         };
     };
-    try std.testing.expectError(validate.Error.MissingVerb, tstParse(allocator, "program", Spec));
+    try std.testing.expectError(error.MissingVerb, tstParse(allocator, "program", Spec));
     const r1 = try tstParse(allocator, "program copy --src file1", Spec);
     const r2 = try tstParse(allocator, "program paste --target file2", Spec);
     const r3 = try tstParse(allocator, "program --verbose false copy --src file3", Spec);
@@ -1162,6 +1183,205 @@ test "parse verb with custom codec" {
     );
 }
 
+test "parse struct options" {
+    const t = std.testing;
+    const base = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const Spec = struct {
+        cfg: Config = .{ .name = "default" },
+        points: []const Point = &.{},
+        maybe: ?Point = .{ .x = 1 },
+        flag: bool = false,
+
+        pub const Point = struct { x: i32, y: i32 = 0 };
+        pub const Config = struct {
+            name: []const u8,
+            verbose: bool = false,
+            tags: []const []const u8 = &.{},
+            origin: Point = .{ .x = 0 },
+        };
+        pub const Short = .{ .c = .cfg };
+    };
+
+    var dcur: coll.DebugCursor = .{
+        .data = &.{
+            "program",
+            "--cfg",
+            "{\"name\": \"x\", \"verbose\": true, \"tags\": [\"a\", \"b c\"], \"origin\": {\"x\": -1, \"y\": 2}}",
+            "--points=[{\"x\": 1}, {\"x\": 2, \"y\": 3}]",
+            "--maybe",
+            "null",
+            "--flag",
+            "pos",
+        },
+    };
+    var c = dcur.asCursor();
+    const r1 = try tstParseSpec(allocator, &c, Spec);
+    try t.expectEqualStrings("x", r1.options.cfg.name);
+    try t.expect(r1.options.cfg.verbose);
+    const expectTags: []const []const u8 = &.{ "a", "b c" };
+    try t.expectEqualDeep(expectTags, r1.options.cfg.tags);
+    try t.expectEqual(Spec.Point{ .x = -1, .y = 2 }, r1.options.cfg.origin);
+    try t.expectEqualDeep(
+        @as([]const Spec.Point, &.{
+            .{ .x = 1 },
+            .{ .x = 2, .y = 3 },
+        }),
+        r1.options.points,
+    );
+    try t.expectEqual(null, r1.options.maybe);
+    try t.expect(r1.options.flag);
+    const expectPos: []const []const u8 = &.{"pos"};
+    try t.expectEqualDeep(expectPos, r1.positionals.reminder.?);
+
+    dcur = .{ .data = &.{ "program", "--points", "{x: 4}, {x: 5, y: 6}" } };
+    c = dcur.asCursor();
+    const rPhantom = try tstParseSpec(allocator, &c, Spec);
+    try t.expectEqualDeep(@as([]const Spec.Point, &.{ .{ .x = 4 }, .{ .x = 5, .y = 6 } }), rPhantom.options.points);
+
+    dcur = .{ .data = &.{ "program", "-c", "{name: y}" } };
+    c = dcur.asCursor();
+    const r2 = try tstParseSpec(allocator, &c, Spec);
+    try t.expectEqualStrings("y", r2.options.cfg.name);
+    try t.expect(!r2.options.cfg.verbose);
+    try t.expectEqual(Spec.Point{ .x = 1 }, r2.options.maybe.?);
+
+    dcur = .{ .data = &.{ "program", "--cfg", "{name: y, nope: 1}" } };
+    c = dcur.asCursor();
+    try t.expectError(
+        error.UnknownStructField,
+        tstParseSpec(allocator, &c, Spec),
+    );
+}
+
+test "parse struct options with custom codec" {
+    const base = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const Spec = struct {
+        p: Point = .{ .x = 0 },
+        ps: []const Point = &.{},
+
+        pub const Point = struct { x: i32, y: i32 = 0, label: []const u8 = "" };
+        pub const SpecFieldEnum = std.meta.FieldEnum(@This());
+        pub const Spc = @This();
+
+        pub const Codec = struct {
+            innerCodec: CodecIn = .{},
+
+            pub const CodecIn = argCodec.ArgCodec(Spc);
+            pub const Error = CodecIn.Error;
+
+            pub fn supports(comptime Tx: type, comptime tag: SpecFieldEnum) bool {
+                _ = tag;
+                return Tx == i32;
+            }
+
+            pub fn parseByType(
+                self: *@This(),
+                comptime Tx: type,
+                comptime tag: SpecFieldEnum,
+                allc: *const Allocator,
+                crsor: *CodecIn.CursorT,
+            ) Error!Tx {
+                if (comptime !supports(Tx, tag)) {
+                    return try CodecIn.parseByType(
+                        self,
+                        Tx,
+                        tag,
+                        allc,
+                        crsor,
+                    );
+                }
+                return (try PrimitiveCodec.parseInt(Tx, crsor)) * 2;
+            }
+        };
+    };
+
+    var dcur: coll.DebugCursor = .{
+        .data = &.{
+            "program",
+            "--p",
+            "{x: 2, y: 3, label: two}",
+            "--ps",
+            "[{x: 1}, {x: 5, y: -5}]",
+        },
+    };
+    var c = dcur.asCursor();
+    const r = try tstParseSpec(
+        allocator,
+        &c,
+        Spec,
+    );
+    try std.testing.expectEqualDeep(
+        Spec.Point{ .x = 4, .y = 6, .label = "two" },
+        r.options.p,
+    );
+    try std.testing.expectEqualDeep(
+        @as([]const Spec.Point, &.{
+            .{ .x = 2 },
+            .{ .x = 10, .y = -10 },
+        }),
+        r.options.ps,
+    );
+}
+
+test "untyped group match error set reaches spec" {
+    const t = std.testing;
+    const base = &t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base.*);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const Spec = struct {
+        a: ?u32 = null,
+        b: ?u32 = null,
+
+        fn validateArgs(set: validate.FieldBitSet(@This())) !void {
+            if (!set.oneOf(.{ .a, .b })) return error.NeedExactlyOneOfAB;
+        }
+
+        pub const GroupMatch: GroupMatchConfig(@This(), validateArgs) = .{};
+    };
+
+    const r = try tstParse(
+        allocator,
+        "program --a 1",
+        Spec,
+    );
+    try t.expectEqual(1, r.options.a.?);
+    try t.expectError(
+        error.NeedExactlyOneOfAB,
+        tstParse(allocator, "program", Spec),
+    );
+    try t.expectError(
+        error.NeedExactlyOneOfAB,
+        tstParse(allocator, "program --a 1 --b 2", Spec),
+    );
+
+    var dcur: coll.DebugCursor = .{ .data = &.{"program"} };
+    var c = dcur.asCursor();
+    var res = SpecResponseWithConfig(Spec, _HelpConf{
+        .headerDelimiter = "",
+    }, false).init(t.allocator);
+    defer res.deinit();
+    const err = res.parse(&c).?;
+    try t.expectEqual(error.NeedExactlyOneOfAB, err.err);
+    try t.expectEqualStrings(
+        \\Failed with reason: NeedExactlyOneOfAB
+        \\
+        \\Options:
+        \\  --a
+        \\  --b
+        \\
+    , err.message.?);
+}
+
 test "validate require" {
     const t = std.testing;
     const base = &std.testing.allocator;
@@ -1177,7 +1397,7 @@ test "validate require" {
         i5: ?i32 = null,
         i6: ?i32 = null,
 
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{};
+        pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{};
     };
     const r = try tstParse(allocator,
         \\program
@@ -1226,19 +1446,17 @@ test "help and inner help" {
                 .shortDescription = "copy test",
             };
 
-            pub fn checkFields(set: validate.FieldBitSet(@This())) validate.Error!void {
+            pub fn checkFields(set: validate.FieldBitSet(@This())) !void {
                 if (!set.allOf(.{.path}))
                     return error.RequiredArgsMissing;
             }
 
-            pub const GroupMatch: GroupMatchConfig(@This()) = .{
-                .validateFn = @This().checkFields,
-            };
+            pub const GroupMatch: GroupMatchConfig(@This(), @This().checkFields) = .{};
         };
         pub const Verb = union(enum) {
             copy: Copy,
         };
-        pub const GroupMatch: GroupMatchConfig(@This()) = .{
+        pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
             .mandatoryVerb = true,
         };
         pub const Help: HelpData(@This()) = .{

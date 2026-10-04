@@ -31,8 +31,9 @@ pub fn build(b: *std.Build) void {
         .dest_sub_path = "debug-unit-tests",
     });
 
-    const test_step = b.step("test", "Run unit tests");
+    const test_step = b.step("test", "Build, install and run unit tests");
     test_step.dependOn(&install_test.step);
+    test_step.dependOn(&run_unit_tests.step);
 
     const test_run_step = b.step("test-run", "Run unit tests");
     test_run_step.dependOn(&run_unit_tests.step);

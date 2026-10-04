@@ -100,6 +100,7 @@ pub fn PositionalOfWithDefault(comptime Config: PositionalConfig, reminderDefaul
 
         pub const CollectError = error{
             MissingPositionalField,
+            ReminderBufferLongerThanArgs,
         } || std.mem.Allocator.Error;
 
         // TODO: test this
@@ -184,6 +185,7 @@ pub fn PositionalOfWithDefault(comptime Config: PositionalConfig, reminderDefaul
 
         pub fn collect(self: *@This(), allocator: *const Allocator) CollectError!Positionals {
             if ((comptime TupleT != void) and self.tupleCursor < self.tuple.len) return CollectError.MissingPositionalField;
+            if ((comptime @typeInfo(ReminderT) == .array) and self.reminderCursor < self.reminder.len) return CollectError.ReminderBufferLongerThanArgs;
             const reminder = if (comptime InnerList == void) self.reminder else rv: {
                 if (self.reminderCursor == 0) {
                     break :rv switch (@typeInfo(ReminderT)) {
@@ -278,6 +280,32 @@ test "parse only buffered reminder" {
     const expect: []const []const u8 = &.{ "hello", "world!" };
     try t.expectEqualDeep(expect, &p.reminder);
     try t.expectError(@TypeOf(pos).Error.ReminderBufferShorterThanArgs, pos.parseNextType(allocator, &c));
+}
+
+test "parse short buffered reminder" {
+    const t = std.testing;
+    const allocator = &std.testing.allocator;
+    const Pos = PositionalOf(.{
+        .ReminderType = [3][]const u8,
+    });
+
+    var pos: Pos = .{};
+    var cursor = coll.DebugCursor{ .data = &.{ "a", "b" } };
+    var c = cursor.asCursor();
+    while (c.peek()) |_| try pos.parseNextType(allocator, &c);
+    try t.expectError(Pos.CollectError.ReminderBufferLongerThanArgs, pos.collect(allocator));
+
+    var empty: Pos = .{};
+    try t.expectError(Pos.CollectError.ReminderBufferLongerThanArgs, empty.collect(allocator));
+
+    var tupled: PositionalOf(.{
+        .TupleType = struct { i32 },
+        .ReminderType = [2]u8,
+    }) = .{};
+    var cursor2 = coll.DebugCursor{ .data = &.{ "1", "x" } };
+    var c2 = cursor2.asCursor();
+    while (c2.peek()) |_| try tupled.parseNextType(allocator, &c2);
+    try t.expectError(@TypeOf(tupled).CollectError.ReminderBufferLongerThanArgs, tupled.collect(allocator));
 }
 
 test "parse dynamic reminder" {
