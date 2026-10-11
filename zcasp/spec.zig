@@ -7,7 +7,7 @@ const argCodec = @import("codec.zig");
 const validate = @import("validate.zig");
 const HelpFmt = @import("./help.zig").HelpFmt;
 const HelpData = @import("./help.zig").HelpData;
-const _HelpConf = @import("./help.zig").HelpConf;
+const HelpConf = @import("./help.zig").HelpConf;
 const PositionalOf = @import("positionals.zig").PositionalOf;
 const EmptyPositionalsOf = @import("positionals.zig").EmptyPositionalsOf;
 const GroupTracker = validate.GroupTracker;
@@ -21,32 +21,35 @@ const ArgCodec = argCodec.ArgCodec;
 const Result = regent.result.Result;
 const Union = regent.meta.Union;
 
-// NOTE: This ties spec positionals default and helper's
-pub fn defaultPositionals() type {
-    return PositionalOf(.{});
-}
+pub const SpecConfig = struct {
+    withProgram: bool = true,
+    withDiagnositcs: bool = false,
+    helpConf: HelpConf = .{},
+};
 
-pub fn SpecResponse(comptime Spec: type) type {
-    return SpecResponseWithConfig(Spec, {}, false);
-}
-
-pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, comptime withDiag: bool) type {
+pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
     // TODO: validate spec
     return struct {
         arena: std.heap.ArenaAllocator,
         codec: SpecCodec,
         options: Options,
-        program: ?[]const u8,
+        program: regent.ergo.RotType(conf.withProgram, []const u8),
         positionals: PosOf.Positionals,
         // TODO: support default verb
-        verb: if (VerbT != void) ?VerbT else void,
+        verb: regent.ergo.RotType(VerbT != void, ?VerbT),
         tracker: SpecTracker,
+
+        fn verbConf() SpecConfig {
+            comptime var newConf = conf;
+            newConf.withProgram = false;
+            return newConf;
+        }
 
         fn SpecUnionVerbs() type {
             const VerbUnion = @typeInfo(Spec.Verb).@"union";
             comptime var newUnionFields: [VerbUnion.fields.len]std.builtin.Type.UnionField = undefined;
             for (VerbUnion.fields, 0..) |f, i| {
-                const newSpecR = SpecResponseWithConfig(f.type, HelpConf, withDiag);
+                const newSpecR = SpecResponse(f.type, verbConf());
                 newUnionFields[i] = .{
                     .name = f.name,
                     .type = newSpecR,
@@ -72,7 +75,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
         pub const Options = Spec;
         const CursorT = coll.Cursor([]const u8);
         pub const VerbT = if (@hasDecl(Spec, "Verb")) SpecUnionVerbs() else void;
-        const PosOf = if (@hasDecl(Spec, "Positionals")) Spec.Positionals else defaultPositionals();
+        const PosOf = if (@hasDecl(Spec, "Positionals")) Spec.Positionals else PositionalOf(.{});
         const SpecCodec = if (@hasDecl(Spec, "Codec")) Spec.Codec else ArgCodec(Spec);
         const SpecTracker = if (@hasDecl(Spec, "GroupMatch"))
             GroupTracker(Spec)
@@ -98,6 +101,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                 PosOf.Error;
             errors = errors || if (VerbT != void) SpecVerbsErrors() else error{};
             errors = errors || if (SpecTracker != void) SpecTracker.ValidationError else error{};
+            errors = errors || if (conf.withProgram) error{MissingProgram} else error{};
             break :E errors;
         };
 
@@ -115,7 +119,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                     .message = help(err),
                 };
 
-                if (comptime withDiag) {
+                if (comptime conf.withDiagnositcs) {
                     const diag: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                     self.lastOpt = diag.lastOpt;
                     self.lastToken = diag.lastToken;
@@ -130,21 +134,8 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                 .arena = std.heap.ArenaAllocator.init(baseAllc),
                 .codec = .{},
                 .options = .{},
-                .program = null,
+                .program = undefined,
                 .positionals = undefined,
-                .verb = if (comptime VerbT != void) null else {},
-                .tracker = if (comptime SpecTracker != void) .{} else {},
-            };
-        }
-
-        pub fn initEmpty(baseAllc: Allocator) @This() {
-            var positionalOf: PosOf = .{};
-            return .{
-                .arena = std.heap.ArenaAllocator.init(baseAllc),
-                .codec = .{},
-                .options = .{},
-                .program = null,
-                .positionals = positionalOf.collectEmpty(),
                 .verb = if (comptime VerbT != void) null else {},
                 .tracker = if (comptime SpecTracker != void) .{} else {},
             };
@@ -162,36 +153,34 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                 };
                 break :rv &c;
             };
-            return self.parseWithDiag(cursor, true);
+            return self.parseWithDiag(cursor);
         }
 
         // TODO: test all error returns
         pub fn parse(self: *@This(), cursor: *CursorT) ?ParseError {
-            return self.parseWithDiag(cursor, true);
+            return self.parseWithDiag(cursor);
         }
 
-        pub fn parseWithDiag(self: *@This(), cursor: *CursorT, comptime parseProgram: bool) ?ParseError {
-            if (comptime withDiag) {
+        fn parseWithDiag(self: *@This(), cursor: *CursorT) ?ParseError {
+            if (comptime conf.withDiagnositcs) {
                 var diag: coll.DiagnosticsCursor = .{
                     .cursor = cursor,
                 };
                 var c = diag.asCursor();
-                return self.parseInner(&c, parseProgram);
+                return self.parseInner(&c);
             }
-            return self.parseInner(cursor, parseProgram);
+            return self.parseInner(cursor);
         }
 
-        fn parseInner(self: *@This(), cursor: *CursorT, comptime parseProgram: bool) ?ParseError {
-            if (comptime parseProgram) {
-                self.program = cursor.next();
-                if (self.program == null) return null;
-            }
+        fn parseInner(self: *@This(), cursor: *CursorT) ?ParseError {
+            if (comptime @FieldType(@This(), "program") != void)
+                self.program = cursor.next() orelse return .ErrOf(error.MissingProgram, cursor);
 
             const allocator = &self.arena.allocator();
             var positionalOf: PosOf = .{};
 
             while (cursor.next()) |arg| {
-                if (comptime withDiag) {
+                if (comptime conf.withDiagnositcs) {
                     const diag: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                     diag.lastOpt = null;
                 }
@@ -248,12 +237,11 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
 
             inline for (@typeInfo(Spec.Verb).@"union".fields) |f| {
                 if (std.mem.eql(u8, f.name, arg)) {
-                    var verbR = SpecResponseWithConfig(
+                    var verbR = SpecResponse(
                         f.type,
-                        HelpConf,
-                        withDiag,
+                        verbConf(),
                     ).init(self.arena.child_allocator);
-                    if (verbR.parseInner(cursor, false)) |e| {
+                    if (verbR.parseInner(cursor)) |e| {
                         return .{
                             .Err = .{
                                 .err = e.err,
@@ -281,7 +269,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                 splitValue = slice[i + 1 ..];
                 cursor.stackItem(splitValue.?);
                 slice = slice[0..i];
-                if (comptime withDiag) {
+                if (comptime conf.withDiagnositcs) {
                     var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                     c.lastToken = splitValue.?;
                 }
@@ -289,7 +277,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
 
             try switch (offset) {
                 2 => rv: {
-                    if (comptime withDiag) {
+                    if (comptime conf.withDiagnositcs) {
                         var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                         c.lastOpt = slice;
                     }
@@ -399,7 +387,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                     };
                     start += optShortArg.?.len;
 
-                    if (comptime withDiag) {
+                    if (comptime conf.withDiagnositcs) {
                         var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                         c.lastOpt = lastArg.arg;
                     }
@@ -426,7 +414,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
                     };
 
                     if (start > 0) {
-                        if (comptime withDiag) {
+                        if (comptime conf.withDiagnositcs) {
                             var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                             c.lastOpt = lastArg.arg;
                         }
@@ -448,7 +436,7 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
 
             // last lastArg set pass
             if (start > 0) {
-                if (comptime withDiag) {
+                if (comptime conf.withDiagnositcs) {
                     var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                     c.lastOpt = lastArg.arg;
                 }
@@ -501,15 +489,17 @@ pub fn SpecResponseWithConfig(comptime Spec: type, comptime HelpConf: anytype, c
         }
 
         pub fn help(e: Error) ?[]const u8 {
-            if (comptime @TypeOf(HelpConf) == void) return null;
-
-            return HelpFmt(Spec, HelpConf).helpForErr(Error, e, "Failed with reason: ");
+            return HelpFmt(Spec, conf.helpConf).helpForErr(Error, e, "Failed with reason: ");
         }
     };
 }
 
-pub fn tstParseSpec(allocator: Allocator, cursor: *coll.Cursor([]const u8), Spec: type) !SpecResponseWithConfig(Spec, {}, true) {
-    var response = SpecResponseWithConfig(Spec, {}, true).init(allocator);
+const t = std.testing;
+
+const TestSpecConf: SpecConfig = .{ .withDiagnositcs = true };
+
+pub fn tstParseSpec(allocator: Allocator, cursor: *coll.Cursor([]const u8), Spec: type) !SpecResponse(Spec, TestSpecConf) {
+    var response = SpecResponse(Spec, TestSpecConf).init(allocator);
     if (response.parse(cursor)) |err| {
         // std.debug.print("Last opt <{?s}>, Last token <{?s}>. ", .{ err.lastOpt, err.lastToken });
         // std.debug.print("{s}\n", .{err.message orelse @errorName(err.err)});
@@ -518,37 +508,49 @@ pub fn tstParseSpec(allocator: Allocator, cursor: *coll.Cursor([]const u8), Spec
     return response;
 }
 
-fn tstParse(allocator: Allocator, data: [:0]const u8, Spec: type) !SpecResponseWithConfig(Spec, {}, true) {
+fn tstParse(allocator: Allocator, data: [:0]const u8, Spec: type) !SpecResponse(Spec, TestSpecConf) {
     var tstCursor = try TstArgCursor.init(&allocator, data);
     var cursor = tstCursor.asCursor();
     return try tstParseSpec(allocator, &cursor, Spec);
 }
 
 test "empty args with default" {
-    const base = &std.testing.allocator;
+    const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
 
-    const r = try tstParse(allocator, "", struct {
+    const Args = struct {
         flag: bool = false,
-    });
-    try std.testing.expectEqual(null, r.program);
-    try std.testing.expectEqual(false, r.options.flag);
+    };
+
+    try t.expectError(error.MissingProgram, tstParse(allocator, "", Args));
+
+    var tstCursor = try TstArgCursor.init(&allocator, "");
+    var cursor = tstCursor.asCursor();
+    var response = SpecResponse(Args, .{
+        .withProgram = false,
+        .withDiagnositcs = true,
+    }).init(allocator);
+    if (response.parse(&cursor)) |err|
+        return err.err;
+
+    try t.expectEqual(false, response.options.flag);
+    try t.expectEqual(@FieldType(@TypeOf(response), "program"), void);
 }
 
 test "program only" {
-    const base = &std.testing.allocator;
+    const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
 
     const r = try tstParse(allocator, "program", struct {});
-    try std.testing.expectEqualStrings("program", r.program.?);
+    try t.expectEqualStrings("program", r.program);
 }
 
 test "parse named" {
-    const base = &std.testing.allocator;
+    const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -558,16 +560,16 @@ test "parse named" {
     const r3 = try tstParse(allocator, "program --cool-flag false", struct { @"cool-flag": bool = false });
     const r4 = try tstParse(allocator, "program --cool-flag something else", struct { @"cool-flag": bool = false });
 
-    try std.testing.expectEqual(true, r.options.@"cool-flag");
-    try std.testing.expectEqual(true, r2.options.@"cool-flag");
-    try std.testing.expectEqual(false, r3.options.@"cool-flag");
-    try std.testing.expectEqual(true, r4.options.@"cool-flag");
+    try t.expectEqual(true, r.options.@"cool-flag");
+    try t.expectEqual(true, r2.options.@"cool-flag");
+    try t.expectEqual(false, r3.options.@"cool-flag");
+    try t.expectEqual(true, r4.options.@"cool-flag");
     const expected: []const []const u8 = &.{ "something", "else" };
-    try std.testing.expectEqualDeep(expected, r4.positionals.reminder.?);
+    try t.expectEqualDeep(expected, r4.positionals.reminder.?);
 }
 
 test "parsed chained flags" {
-    const base = &std.testing.allocator;
+    const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -588,15 +590,15 @@ test "parsed chained flags" {
         };
     };
     const r1 = try tstParse(allocator, "program -aaAbSsc=false", Spec);
-    try std.testing.expect(r1.options.t1);
-    try std.testing.expect(r1.options.t2);
-    try std.testing.expect(r1.options.t3);
-    try std.testing.expect(r1.options.t4);
-    try std.testing.expect(!r1.options.t5);
+    try t.expect(r1.options.t1);
+    try t.expect(r1.options.t2);
+    try t.expect(r1.options.t3);
+    try t.expect(r1.options.t4);
+    try t.expect(!r1.options.t5);
 }
 
 test "parsed glued arg/param chain" {
-    const base = &std.testing.allocator;
+    const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -615,14 +617,14 @@ test "parsed glued arg/param chain" {
         };
     };
     const r1 = try tstParse(allocator, "program -m512sHelloc5b=3", Spec);
-    try std.testing.expectEqual(512, r1.options.mem);
-    try std.testing.expectEqualStrings("Hello", r1.options.str);
-    try std.testing.expectEqual(5, r1.options.count);
-    try std.testing.expectEqual(3, r1.options.bth);
+    try t.expectEqual(512, r1.options.mem);
+    try t.expectEqualStrings("Hello", r1.options.str);
+    try t.expectEqual(5, r1.options.count);
+    try t.expectEqual(3, r1.options.bth);
 }
 
 test "parse short arg" {
-    const base = &std.testing.allocator;
+    const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -641,18 +643,18 @@ test "parse short arg" {
     const r3 = try tstParse(allocator, "program -s false -S false", Spec);
     const r4 = try tstParse(allocator, "program -s true -S true", Spec);
 
-    try std.testing.expectEqual(true, r1.options.something);
-    try std.testing.expectEqual(true, r1.options.@"super-something");
-    try std.testing.expectEqual(false, r2.options.something);
-    try std.testing.expectEqual(true, r2.options.@"super-something");
-    try std.testing.expectEqual(false, r3.options.something);
-    try std.testing.expectEqual(false, r3.options.@"super-something");
-    try std.testing.expectEqual(true, r4.options.something);
-    try std.testing.expectEqual(true, r4.options.@"super-something");
+    try t.expectEqual(true, r1.options.something);
+    try t.expectEqual(true, r1.options.@"super-something");
+    try t.expectEqual(false, r2.options.something);
+    try t.expectEqual(true, r2.options.@"super-something");
+    try t.expectEqual(false, r3.options.something);
+    try t.expectEqual(false, r3.options.@"super-something");
+    try t.expectEqual(true, r4.options.something);
+    try t.expectEqual(true, r4.options.@"super-something");
 }
 
 test "parse different types" {
-    const base = &std.testing.allocator;
+    const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -709,35 +711,35 @@ test "parse different types" {
         Spec,
     );
 
-    try std.testing.expect(r1.options.o1);
-    try std.testing.expectEqual(0, r1.options.u1);
-    try std.testing.expectEqual(1.1, r1.options.f1);
-    try std.testing.expect(!r1.options.b);
-    try std.testing.expectEqual(Spec.Animal.dog, r1.options.e);
-    try std.testing.expectEqualStrings("Hello", r1.options.s1);
-    try std.testing.expectEqualStrings("Hello World", r1.options.s2);
-    try std.testing.expectEqualStrings("Hi", &r1.options.pres1);
-    try std.testing.expectEqualDeep(&[_]u1{ 1, 0, 1, 0 }, r1.options.au1);
-    try std.testing.expectEqualDeep(&[_]u32{ 32, 23, 133, 99, 10 }, r1.options.au32);
-    try std.testing.expectEqualDeep(&[_]i32{ -1, -44, 22222, -1 }, r1.options.ai32);
+    try t.expect(r1.options.o1);
+    try t.expectEqual(0, r1.options.u1);
+    try t.expectEqual(1.1, r1.options.f1);
+    try t.expect(!r1.options.b);
+    try t.expectEqual(Spec.Animal.dog, r1.options.e);
+    try t.expectEqualStrings("Hello", r1.options.s1);
+    try t.expectEqualStrings("Hello World", r1.options.s2);
+    try t.expectEqualStrings("Hi", &r1.options.pres1);
+    try t.expectEqualDeep(&[_]u1{ 1, 0, 1, 0 }, r1.options.au1);
+    try t.expectEqualDeep(&[_]u32{ 32, 23, 133, 99, 10 }, r1.options.au32);
+    try t.expectEqualDeep(&[_]i32{ -1, -44, 22222, -1 }, r1.options.ai32);
     const expectedAs1: []const []const u8 = &.{ "Hello", " World ", "!" };
-    try std.testing.expectEqualDeep(expectedAs1, r1.options.as1);
+    try t.expectEqualDeep(expectedAs1, r1.options.as1);
     const expectedAs2: []const [:0]const u8 = &.{ "Im", "Losing it" };
-    try std.testing.expectEqualDeep(expectedAs2, r1.options.as2);
+    try t.expectEqualDeep(expectedAs2, r1.options.as2);
     const expectedAau32: []const [:0]const u32 = &.{ &.{ 1, 3 }, &.{ 3300, 222, 333, 33 }, &.{1} };
-    try std.testing.expectEqualDeep(expectedAau32, r1.options.aau32);
+    try t.expectEqualDeep(expectedAau32, r1.options.aau32);
     const expectedAaf32: []const []const f32 = &.{ &.{ 1.1, 3.2, -1 }, &.{ 3.1, 2, 5 }, &.{1.2}, &.{7.1} };
-    try std.testing.expectEqualDeep(expectedAaf32, r1.options.aaf32);
+    try t.expectEqualDeep(expectedAaf32, r1.options.aaf32);
     const expectedAai32: []const []const i32 = &.{ &.{-1}, &.{ 2, -2 } };
-    try std.testing.expectEqualDeep(expectedAai32, r1.options.aai32);
+    try t.expectEqualDeep(expectedAai32, r1.options.aai32);
     const expectAab: []const []const bool = &.{ &.{ true, true, false }, &.{ false, true } };
-    try std.testing.expectEqualDeep(expectAab, r1.options.aab);
-    try std.testing.expectEqualDeep(&[_]Spec.Animal{ .cat, .cat }, r1.options.ae);
-    try std.testing.expect(r1.options.o2);
+    try t.expectEqualDeep(expectAab, r1.options.aab);
+    try t.expectEqualDeep(&[_]Spec.Animal{ .cat, .cat }, r1.options.ae);
+    try t.expect(r1.options.o2);
 }
 
 test "parse kvargs" {
-    const base = &std.testing.allocator;
+    const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -753,17 +755,17 @@ test "parse kvargs" {
     };
 
     const r1 = try tstParse(allocator, "program -s=true --super-something=true", Spec);
-    try std.testing.expectError(
-        SpecResponse(Spec).Error.ArgEqualSplitNotConsumed,
+    try t.expectError(
+        @TypeOf(r1).Error.ArgEqualSplitNotConsumed,
         tstParse(allocator, "program -s= --super-something=true", Spec),
     );
 
-    try std.testing.expectEqual(true, r1.options.something);
-    try std.testing.expectEqual(true, r1.options.@"super-something");
+    try t.expectEqual(true, r1.options.something);
+    try t.expectEqual(true, r1.options.@"super-something");
 }
 
 test "parse glued named arg" {
-    const base = &std.testing.allocator;
+    const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -773,11 +775,10 @@ test "parse glued named arg" {
     };
 
     const r1 = try tstParse(allocator, "program --count10", Spec);
-    try std.testing.expectEqual(10, r1.options.count);
+    try t.expectEqual(10, r1.options.count);
 }
 
 test "parse positionals" {
-    const t = std.testing;
     const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
@@ -785,19 +786,19 @@ test "parse positionals" {
 
     const r1 = try tstParse(allocator, "program positional1 positional2 positional3", struct {});
     const expectedPositionals: []const []const u8 = &.{ "positional1", "positional2", "positional3" };
-    try std.testing.expectEqual({}, r1.positionals.tuple);
-    try std.testing.expectEqualDeep(expectedPositionals, r1.positionals.reminder.?);
+    try t.expectEqual({}, r1.positionals.tuple);
+    try t.expectEqualDeep(expectedPositionals, r1.positionals.reminder.?);
 
     const r2 = try tstParse(allocator, "program --test positional1 positional2 positional3", struct { @"test": bool = false });
-    try std.testing.expect(r2.options.@"test");
-    try std.testing.expectEqual({}, r2.positionals.tuple);
-    try std.testing.expectEqualDeep(expectedPositionals, r2.positionals.reminder.?);
+    try t.expect(r2.options.@"test");
+    try t.expectEqual({}, r2.positionals.tuple);
+    try t.expectEqualDeep(expectedPositionals, r2.positionals.reminder.?);
 
     const r3 = try tstParse(allocator, "program -- --test positional1 positional2 positional3", struct { @"test": bool = false });
-    try std.testing.expect(!r3.options.@"test");
+    try t.expect(!r3.options.@"test");
     const expectSkip: []const []const u8 = &.{ "--test", "positional1", "positional2", "positional3" };
-    try std.testing.expectEqual({}, r3.positionals.tuple);
-    try std.testing.expectEqualDeep(expectSkip, r3.positionals.reminder.?);
+    try t.expectEqual({}, r3.positionals.tuple);
+    try t.expectEqualDeep(expectSkip, r3.positionals.reminder.?);
 
     const r4 = try tstParse(
         allocator,
@@ -808,17 +809,16 @@ test "parse positionals" {
             pub const Verb = union(enum) { verb1: Verb1 };
         },
     );
-    try std.testing.expect(r4.options.@"test");
+    try t.expect(r4.options.@"test");
     const expectL1Pos: []const []const u8 = &.{ "-", "pos1" };
-    try std.testing.expectEqual({}, r4.positionals.tuple);
-    try std.testing.expectEqualDeep(expectL1Pos, r4.positionals.reminder.?);
+    try t.expectEqual({}, r4.positionals.tuple);
+    try t.expectEqualDeep(expectL1Pos, r4.positionals.reminder.?);
     const expectL2Pos: []const []const u8 = &.{ "pos2", "pos3" };
-    try std.testing.expectEqual({}, r4.verb.?.verb1.positionals.tuple);
-    try std.testing.expectEqualDeep(expectL2Pos, r4.verb.?.verb1.positionals.reminder.?);
+    try t.expectEqual({}, r4.verb.?.verb1.positionals.tuple);
+    try t.expectEqualDeep(expectL2Pos, r4.verb.?.verb1.positionals.reminder.?);
 }
 
 test "parse custom positionals" {
-    const t = std.testing;
     const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
@@ -854,7 +854,6 @@ test "parse custom positionals" {
 }
 
 test "parse sized reminder must be exact" {
-    const t = std.testing;
     const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
@@ -875,7 +874,6 @@ test "parse sized reminder must be exact" {
 }
 
 test "parse custom positionals with verb" {
-    const t = std.testing;
     const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
@@ -914,7 +912,7 @@ test "parse custom positionals with verb" {
 }
 
 test "parse verb" {
-    const base = &std.testing.allocator;
+    const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -939,35 +937,35 @@ test "parse verb" {
             .mandatoryVerb = true,
         };
     };
-    try std.testing.expectError(error.MissingVerb, tstParse(allocator, "program", Spec));
+    try t.expectError(error.MissingVerb, tstParse(allocator, "program", Spec));
     const r1 = try tstParse(allocator, "program copy --src file1", Spec);
     const r2 = try tstParse(allocator, "program paste --target file2", Spec);
     const r3 = try tstParse(allocator, "program --verbose false copy --src file3", Spec);
     const r4 = try tstParse(allocator, "program --verbose true paste --target file4", Spec);
     const r5 = try tstParse(allocator, "program --verbose true paste --target file4 positional1", Spec);
 
-    try std.testing.expectEqual(Spec.Copy, @TypeOf(r1.verb.?.copy.options));
-    try std.testing.expectEqualStrings("file1", r1.verb.?.copy.options.src);
-    try std.testing.expectEqual(null, r1.options.verbose);
-    try std.testing.expectEqual(Spec.Paste, @TypeOf(r2.verb.?.paste.options));
-    try std.testing.expectEqualStrings("file2", r2.verb.?.paste.options.target);
-    try std.testing.expectEqual(null, r2.options.verbose);
-    try std.testing.expectEqual(Spec.Copy, @TypeOf(r3.verb.?.copy.options));
-    try std.testing.expectEqualStrings("file3", r3.verb.?.copy.options.src);
-    try std.testing.expectEqual(false, r3.options.verbose.?);
-    try std.testing.expectEqual(Spec.Paste, @TypeOf(r4.verb.?.paste.options));
-    try std.testing.expectEqualStrings("file4", r4.verb.?.paste.options.target);
-    try std.testing.expectEqual(true, r4.options.verbose.?);
-    try std.testing.expectEqual(Spec.Paste, @TypeOf(r5.verb.?.paste.options));
-    try std.testing.expectEqualStrings("file4", r5.verb.?.paste.options.target);
-    try std.testing.expectEqual(true, r5.options.verbose);
+    try t.expectEqual(Spec.Copy, @TypeOf(r1.verb.?.copy.options));
+    try t.expectEqualStrings("file1", r1.verb.?.copy.options.src);
+    try t.expectEqual(null, r1.options.verbose);
+    try t.expectEqual(Spec.Paste, @TypeOf(r2.verb.?.paste.options));
+    try t.expectEqualStrings("file2", r2.verb.?.paste.options.target);
+    try t.expectEqual(null, r2.options.verbose);
+    try t.expectEqual(Spec.Copy, @TypeOf(r3.verb.?.copy.options));
+    try t.expectEqualStrings("file3", r3.verb.?.copy.options.src);
+    try t.expectEqual(false, r3.options.verbose.?);
+    try t.expectEqual(Spec.Paste, @TypeOf(r4.verb.?.paste.options));
+    try t.expectEqualStrings("file4", r4.verb.?.paste.options.target);
+    try t.expectEqual(true, r4.options.verbose.?);
+    try t.expectEqual(Spec.Paste, @TypeOf(r5.verb.?.paste.options));
+    try t.expectEqualStrings("file4", r5.verb.?.paste.options.target);
+    try t.expectEqual(true, r5.options.verbose);
     const expected: []const []const u8 = &.{"positional1"};
-    try std.testing.expectEqualDeep(expected, r5.verb.?.paste.positionals.reminder.?);
+    try t.expectEqualDeep(expected, r5.verb.?.paste.positionals.reminder.?);
 }
 
 // TODO: move to example
 test "parse with custom codec" {
-    const base = std.testing.allocator;
+    const base = t.allocator;
     var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1066,15 +1064,15 @@ test "parse with custom codec" {
     ,
         Spec,
     );
-    try std.testing.expectEqual(62, r.options.i);
-    try std.testing.expectEqual(31, r.options.i2);
-    try std.testing.expectEqual(15, r.options.arf);
-    try std.testing.expectEqual(true, r.options.b);
+    try t.expectEqual(62, r.options.i);
+    try t.expectEqual(31, r.options.i2);
+    try t.expectEqual(15, r.options.arf);
+    try t.expectEqual(true, r.options.b);
 }
 
 // TODO: move to example
 test "parse verb with custom codec" {
-    const base = std.testing.allocator;
+    const base = t.allocator;
     var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1162,12 +1160,12 @@ test "parse verb with custom codec" {
         "program paste --target file1",
         Spec,
     );
-    try std.testing.expectEqualStrings(
+    try t.expectEqualStrings(
         "~/.config/file/file1.png",
         r1.verb.?.paste.options.target,
     );
 
-    try std.testing.expectError(
+    try t.expectError(
         Spec.Paste.Codec.Error.UnsupportedPathInFileName,
         tstParse(allocator, "program paste --target /file1", Spec),
     );
@@ -1177,15 +1175,14 @@ test "parse verb with custom codec" {
         "program copy --src file1",
         Spec,
     );
-    try std.testing.expectEqualStrings(
+    try t.expectEqualStrings(
         "file1",
         r2.verb.?.copy.options.src,
     );
 }
 
 test "parse struct options" {
-    const t = std.testing;
-    const base = std.testing.allocator;
+    const base = t.allocator;
     var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1258,7 +1255,7 @@ test "parse struct options" {
 }
 
 test "parse struct options with custom codec" {
-    const base = std.testing.allocator;
+    const base = t.allocator;
     var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1318,11 +1315,11 @@ test "parse struct options with custom codec" {
         &c,
         Spec,
     );
-    try std.testing.expectEqualDeep(
+    try t.expectEqualDeep(
         Spec.Point{ .x = 4, .y = 6, .label = "two" },
         r.options.p,
     );
-    try std.testing.expectEqualDeep(
+    try t.expectEqualDeep(
         @as([]const Spec.Point, &.{
             .{ .x = 2 },
             .{ .x = 10, .y = -10 },
@@ -1332,7 +1329,6 @@ test "parse struct options with custom codec" {
 }
 
 test "untyped group match error set reaches spec" {
-    const t = std.testing;
     const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
@@ -1366,9 +1362,9 @@ test "untyped group match error set reaches spec" {
 
     var dcur: coll.DebugCursor = .{ .data = &.{"program"} };
     var c = dcur.asCursor();
-    var res = SpecResponseWithConfig(Spec, _HelpConf{
-        .headerDelimiter = "",
-    }, false).init(t.allocator);
+    var res = SpecResponse(Spec, .{
+        .helpConf = .{ .headerDelimiter = "" },
+    }).init(t.allocator);
     defer res.deinit();
     const err = res.parse(&c).?;
     try t.expectEqual(error.NeedExactlyOneOfAB, err.err);
@@ -1383,8 +1379,7 @@ test "untyped group match error set reaches spec" {
 }
 
 test "validate require" {
-    const t = std.testing;
-    const base = &std.testing.allocator;
+    const base = &t.allocator;
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
@@ -1407,11 +1402,11 @@ test "validate require" {
         \\--i4 4
         \\--i6 5
     , Spec);
-    try t.expectEqualStrings("program", r.program.?);
+    try t.expectEqualStrings("program", r.program);
 }
 
 test "parsed spec cleanup with verb" {
-    const allocator = std.testing.allocator;
+    const allocator = t.allocator;
     var tstCursor = try TstArgCursor.init(&allocator,
         \\program
         \\--verbose
@@ -1471,10 +1466,10 @@ test "help and inner help" {
     };
     var c = dcur.asCursor();
 
-    const Res = SpecResponseWithConfig(Spec, _HelpConf{}, true);
-    var r = Res.init(std.testing.allocator);
+    const Res = SpecResponse(Spec, .{ .withDiagnositcs = true });
+    var r = Res.init(t.allocator);
     if (r.parse(&c)) |err| {
-        try std.testing.expectEqualStrings(
+        try t.expectEqualStrings(
             \\Failed with reason: MissingVerb
             \\
             \\  test
@@ -1496,9 +1491,9 @@ test "help and inner help" {
     };
     c = dcur.asCursor();
 
-    r = Res.init(std.testing.allocator);
+    r = Res.init(t.allocator);
     if (r.parse(&c)) |err| {
-        try std.testing.expectEqualStrings(
+        try t.expectEqualStrings(
             \\Failed with reason: RequiredArgsMissing
             \\
             \\  copy test

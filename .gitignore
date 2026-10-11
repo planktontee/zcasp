@@ -6,3 +6,4 @@ zig-pkg
 .vscode
 dependencies
 .gitmodules
+TODO.md
