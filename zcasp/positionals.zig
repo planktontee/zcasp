@@ -11,65 +11,52 @@ const Array = regent.meta.Array;
 const Optional = regent.meta.Optional;
 const Pointer = regent.meta.Pointer;
 
-pub const EmptyPositionalsOf = PositionalOf(.{
-    .TupleType = void,
-    .ReminderType = void,
-});
-
 pub const PositionalConfig = struct {
     TupleType: type = void,
-    // NOTE: the default allocates
-    ReminderType: type = ?[]const []const u8,
+    ReminderType: type = void,
     CodecType: type = PrimitiveCodec,
 };
 
-// NOTE: this essentially only handles void and ?[]const []const u8
-pub fn PositionalOf(comptime Config: PositionalConfig) type {
-    return PositionalOfWithDefault(Config, switch (@typeInfo(Config.ReminderType)) {
-        .void => {},
-        .optional => |opt| rv: {
-            if (opt.child == []const []const u8) {
-                break :rv null;
-            } else {
-                break :rv undefined;
-            }
-        },
-        else => undefined,
-    });
-}
-
 // NOTE: this is meant to be used with an arena, not owned by this object
 // the only case this allocates in heap is for dynamic arrays or sentinel slices
-pub fn PositionalOfWithDefault(comptime Config: PositionalConfig, reminderDefault: Config.ReminderType) type {
+pub fn PositionalOf(comptime Config: PositionalConfig) type {
+    const badTupleTMessage = std.fmt.comptimePrint(
+        "Invalid Positional tuple type: {s}, type must be either a tuple or void",
+        .{@typeName(Config.TupleType)},
+    );
+    switch (@typeInfo(Config.TupleType)) {
+        .void => {},
+        .@"struct" => |sInfo| if (!sInfo.is_tuple)
+            @compileError(badTupleTMessage),
+        else => @compileError(badTupleTMessage),
+    }
+
+    const unsupportedMessage = comptime std.fmt.comptimePrint(
+        "Unsupported Reminder type {s}, it has to be a collection",
+        .{@typeName(Config.ReminderType)},
+    );
+    const ReminderTInfo: std.builtin.Type = reminder_check: switch (@typeInfo(Config.ReminderType)) {
+        .optional => |opt| switch (@typeInfo(opt.child)) {
+            .array, .pointer => continue :reminder_check @typeInfo(opt.child),
+            else => @compileError(unsupportedMessage),
+        },
+        .array => |arrT| .{ .array = arrT },
+        .pointer => |pT| .{ .pointer = pT },
+        .void => .void,
+        else => @compileError(unsupportedMessage),
+    };
+
     return struct {
         pub const TupleT = Config.TupleType;
         pub const ReminderT = Config.ReminderType;
         const CodecT = Config.CodecType;
-        const InnerList = if (reminderT() == .pointer) std.ArrayListUnmanaged(remindChildT()) else void;
-
-        fn reminderT() std.builtin.Type {
-            const unsupportedMessage = comptime std.fmt.comptimePrint(
-                "Unsupported Reminder type {s}, it has to be a collection",
-                .{@typeName(ReminderT)},
-            );
-
-            return comptime rfd: switch (@typeInfo(ReminderT)) {
-                .optional => |opt| switch (@typeInfo(opt.child)) {
-                    .array, .pointer => continue :rfd @typeInfo(opt.child),
-                    else => @compileError(unsupportedMessage),
-                },
-                .array => |arr| @typeInfo(Array(arr)),
-                .pointer => |ptr| @typeInfo(Pointer(ptr)),
-                .void => @typeInfo(void),
-                else => @compileError(unsupportedMessage),
-            };
-        }
+        const InnerList = if (ReminderTInfo == .pointer) std.ArrayListUnmanaged(remindChildT()) else void;
 
         fn remindChildT() type {
             return rfd: switch (@typeInfo(ReminderT)) {
                 .optional => |opt| continue :rfd @typeInfo(opt.child),
-                .array => |arr| std.meta.Child(Array(arr)),
-                .pointer => |ptr| std.meta.Child(Pointer(ptr)),
+                .array => |arr| arr.child,
+                .pointer => |ptr| ptr.child,
                 else => @compileError(std.fmt.comptimePrint(
                     "Unsupported Reminder type {s}, it has to be a collection",
                     .{@typeName(ReminderT)},
@@ -77,9 +64,9 @@ pub fn PositionalOfWithDefault(comptime Config: PositionalConfig, reminderDefaul
             };
         }
 
-        tuple: TupleT = if (TupleT == void) {} else undefined,
-        reminder: ReminderT = reminderDefault,
-        list: InnerList = if (InnerList != void) undefined else {},
+        tuple: TupleT = regent.ergo.rotValue(TupleT != void, undefined),
+        reminder: ReminderT = regent.ergo.rotValue(ReminderT != void, undefined),
+        list: InnerList = regent.ergo.rotValue(InnerList != void, undefined),
         tupleCursor: usize = 0,
         reminderCursor: usize = 0,
         codec: CodecT = .{},
@@ -123,7 +110,7 @@ pub fn PositionalOfWithDefault(comptime Config: PositionalConfig, reminderDefaul
                 if (self.tupleCursor >= self.tuple.len) return Error.ParseNextCalledOnTupleEnd;
             } else {
                 if ((comptime TupleT == void) or self.tupleCursor >= self.tuple.len) {
-                    if (reminderT() == .array) {
+                    if (ReminderTInfo == .array) {
                         try self.nextReminderBuffered(allocator, cursor);
                     } else {
                         try self.nextReminder(allocator, cursor);
@@ -165,7 +152,6 @@ pub fn PositionalOfWithDefault(comptime Config: PositionalConfig, reminderDefaul
             const allocator = allc.*;
             if (self.reminderCursor == 0) {
                 if (comptime InnerList == void) {
-                    @compileLog(remindChildT());
                     @compileError("Unsupported call to nextReminder with non inner list");
                 } else {
                     self.list = try std.ArrayListUnmanaged(remindChildT()).initCapacity(allocator, 8);
@@ -186,50 +172,48 @@ pub fn PositionalOfWithDefault(comptime Config: PositionalConfig, reminderDefaul
         pub fn collect(self: *@This(), allocator: *const Allocator) CollectError!Positionals {
             if ((comptime TupleT != void) and self.tupleCursor < self.tuple.len) return CollectError.MissingPositionalField;
             if ((comptime @typeInfo(ReminderT) == .array) and self.reminderCursor < self.reminder.len) return CollectError.ReminderBufferLongerThanArgs;
-            const reminder = if (comptime InnerList == void) self.reminder else rv: {
+            const reminder: ReminderT = if (comptime InnerList == void) self.reminder else rv: {
                 if (self.reminderCursor == 0) {
                     break :rv switch (@typeInfo(ReminderT)) {
                         .optional => null,
                         else => &.{},
                     };
                 }
-                break :rv try self.list.toOwnedSlice(allocator.*);
+                break :rv if (comptime rfd: switch (@typeInfo(ReminderT)) {
+                    .optional => |opt| continue :rfd @typeInfo(opt.child),
+                    .array => |arrInfo| arrInfo.sentinel(),
+                    .pointer => |pInfo| pInfo.sentinel(),
+                    else => null,
+                }) |sentinel|
+                    try self.list.toOwnedSliceSentinel(allocator.*, sentinel)
+                else
+                    try self.list.toOwnedSlice(allocator.*);
             };
             return .{
                 .tuple = self.tuple,
                 .reminder = reminder,
             };
         }
-
-        // TODO: test this and funky types
-        pub fn collectEmpty(self: *const @This()) Positionals {
-            return .{
-                .tuple = self.tuple,
-                .reminder = self.reminder,
-            };
-        }
     };
 }
 
-test "empty reminder" {
-    const t = std.testing;
+const t = std.testing;
 
+test "empty reminder" {
     var pos: PositionalOf(.{
         .ReminderType = []const []const u8,
     }) = .{};
 
-    const p = try pos.collect(&std.testing.allocator);
+    const p = try pos.collect(&t.allocator);
     try t.expectEqualDeep(&.{}, p.reminder);
 
-    var pos2: PositionalOf(.{}) = .{};
+    var pos2: PositionalOf(.{ .ReminderType = ?[]const []const u8 }) = .{};
 
-    const p2 = try pos2.collect(&std.testing.allocator);
+    const p2 = try pos2.collect(&t.allocator);
     try t.expectEqual(null, p2.reminder);
 }
 
 test "parse positionals tuple" {
-    const t = std.testing;
-
     var pos: PositionalOf(.{
         .TupleType = struct { i32, bool, [3]u4 },
         .ReminderType = [2][]const u8,
@@ -246,8 +230,8 @@ test "parse positionals tuple" {
     };
     var c = cursor.asCursor();
 
-    while (c.peek()) |_| try pos.parseNextType(&std.testing.allocator, &c);
-    const p = try pos.collect(&std.testing.allocator);
+    while (c.peek()) |_| try pos.parseNextType(&t.allocator, &c);
+    const p = try pos.collect(&t.allocator);
 
     try t.expectEqual(-13, p.tuple[0]);
     try t.expectEqual(false, p.tuple[1]);
@@ -257,8 +241,7 @@ test "parse positionals tuple" {
 }
 
 test "parse only buffered reminder" {
-    const t = std.testing;
-    const allocator = &std.testing.allocator;
+    const allocator = &t.allocator;
 
     var pos: PositionalOf(.{
         .ReminderType = [2][]const u8,
@@ -283,8 +266,7 @@ test "parse only buffered reminder" {
 }
 
 test "parse short buffered reminder" {
-    const t = std.testing;
-    const allocator = &std.testing.allocator;
+    const allocator = &t.allocator;
     const Pos = PositionalOf(.{
         .ReminderType = [3][]const u8,
     });
@@ -309,10 +291,9 @@ test "parse short buffered reminder" {
 }
 
 test "parse dynamic reminder" {
-    const t = std.testing;
-    const allocator = &std.testing.allocator;
+    const allocator = &t.allocator;
 
-    var pos: PositionalOf(.{}) = .{};
+    var pos: PositionalOf(.{ .ReminderType = ?[]const []const u8 }) = .{};
     var cursor = coll.DebugCursor{
         .data = &.{
             "hello",
@@ -324,7 +305,7 @@ test "parse dynamic reminder" {
 
     while (c.peek()) |_| try pos.parseNextType(allocator, &c);
 
-    const p = try pos.collect(&std.testing.allocator);
+    const p = try pos.collect(&t.allocator);
     defer allocator.free(p.reminder.?);
 
     try t.expectEqual({}, p.tuple);
@@ -332,9 +313,30 @@ test "parse dynamic reminder" {
     try t.expectEqualDeep(expect, p.reminder.?);
 }
 
+test "parse sentinel reminder" {
+    const allocator = &t.allocator;
+
+    inline for (.{ [:0]const i32, ?[:0]const i32 }) |R| {
+        var pos: PositionalOf(.{ .ReminderType = R }) = .{};
+        var cursor = coll.DebugCursor{ .data = &.{ "1", "2" } };
+        var c = cursor.asCursor();
+        while (c.peek()) |_| try pos.parseNextType(allocator, &c);
+
+        const p = try pos.collect(allocator);
+        const reminder: [:0]const i32 = if (@typeInfo(R) == .optional) p.reminder.? else p.reminder;
+        defer allocator.free(reminder);
+        try t.expectEqualSlices(i32, &.{ 1, 2 }, reminder);
+        try t.expectEqual(0, reminder[reminder.len]);
+    }
+
+    var empty: PositionalOf(.{ .ReminderType = [:0]const i32 }) = .{};
+    const p = try empty.collect(allocator);
+    try t.expectEqual(0, p.reminder.len);
+    try t.expectEqual(0, p.reminder[p.reminder.len]);
+}
+
 test "parse tuple only" {
-    const t = std.testing;
-    const allocator = &std.testing.allocator;
+    const allocator = &t.allocator;
 
     var pos: PositionalOf(.{
         .TupleType = struct { i32, bool, [3]u4 },
@@ -363,8 +365,7 @@ test "parse tuple only" {
 }
 
 test "parse empty positional" {
-    const t = std.testing;
-    const allocator = &std.testing.allocator;
+    const allocator = &t.allocator;
 
     var cursor = coll.DebugCursor{
         .data = &.{},
@@ -383,8 +384,7 @@ test "parse empty positional" {
 }
 
 test "custom codec doubles i32 tuple input" {
-    const t = std.testing;
-    const allocator = &std.testing.allocator;
+    const allocator = &t.allocator;
 
     const CustomCodec = struct {
         pub const Error = error{ InvalidType, ParseIntError } || std.fmt.ParseIntError;

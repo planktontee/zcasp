@@ -791,6 +791,7 @@ test "positionals" {
     const Spec = struct {
         pub const Positionals = PositionalOf(.{
             .TupleType = struct { i32, u32 },
+            .ReminderType = ?[]const []const u8,
         });
 
         pub const Help: HelpData(@This()) = .{
@@ -817,7 +818,7 @@ test "positionals" {
     , HelpFmt(Spec, .{ .headerDelimiter = "", .simpleTypes = true }).positionals().?);
 
     const SpecWithoutTup = struct {
-        pub const Positionals = PositionalOf(.{});
+        pub const Positionals = PositionalOf(.{ .ReminderType = ?[]const []const u8 });
 
         pub const Help: HelpData(@This()) = .{
             .positionalsDescription = .{
@@ -862,7 +863,7 @@ test "positionals" {
     , HelpFmt(SpecWithoutRemind, .{ .headerDelimiter = "", .simpleTypes = true }).positionals().?);
 
     const SpecWithoutTupEmptyDesc = struct {
-        pub const Positionals = PositionalOf(.{});
+        pub const Positionals = PositionalOf(.{ .ReminderType = ?[]const []const u8 });
 
         pub const Help: HelpData(@This()) = .{
             .positionalsDescription = .{},
@@ -1494,6 +1495,7 @@ test "commands and positionals forced newline alignment" {
     const Spec = struct {
         pub const Positionals = PositionalOf(.{
             .TupleType = struct { i32 },
+            .ReminderType = ?[]const []const u8,
         });
         pub const A = struct {
             pub const Help: HelpData(@This()) = .{ .shortDescription = "first\nsecond" };
@@ -1974,6 +1976,7 @@ test "help" {
         i1: i32 = 0,
         pub const Positionals = PositionalOf(.{
             .TupleType = struct { [2]i32, []const u8 },
+            .ReminderType = ?[]const []const u8,
         });
         pub const Match = struct {
             pub const Help: HelpData(@This()) = .{

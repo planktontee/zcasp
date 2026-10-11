@@ -9,7 +9,6 @@ const HelpFmt = @import("./help.zig").HelpFmt;
 const HelpData = @import("./help.zig").HelpData;
 const HelpConf = @import("./help.zig").HelpConf;
 const PositionalOf = @import("positionals.zig").PositionalOf;
-const EmptyPositionalsOf = @import("positionals.zig").EmptyPositionalsOf;
 const GroupTracker = validate.GroupTracker;
 const GroupTrackerWithConfig = validate.GroupTrackerWithConfig;
 const GroupMatchConfig = validate.GroupMatchConfig;
@@ -558,14 +557,17 @@ test "parse named" {
     const r = try tstParse(allocator, "program --cool-flag", struct { @"cool-flag": bool = false });
     const r2 = try tstParse(allocator, "program --cool-flag true", struct { @"cool-flag": bool = false });
     const r3 = try tstParse(allocator, "program --cool-flag false", struct { @"cool-flag": bool = false });
-    const r4 = try tstParse(allocator, "program --cool-flag something else", struct { @"cool-flag": bool = false });
+    const r4 = try tstParse(allocator, "program --cool-flag something else", struct {
+        @"cool-flag": bool = false,
+        pub const Positionals = PositionalOf(.{ .ReminderType = []const []const u8 });
+    });
 
     try t.expectEqual(true, r.options.@"cool-flag");
     try t.expectEqual(true, r2.options.@"cool-flag");
     try t.expectEqual(false, r3.options.@"cool-flag");
     try t.expectEqual(true, r4.options.@"cool-flag");
     const expected: []const []const u8 = &.{ "something", "else" };
-    try t.expectEqualDeep(expected, r4.positionals.reminder.?);
+    try t.expectEqualDeep(expected, r4.positionals.reminder);
 }
 
 test "parsed chained flags" {
@@ -783,39 +785,51 @@ test "parse positionals" {
     var arena = std.heap.ArenaAllocator.init(base.*);
     defer arena.deinit();
     const allocator = arena.allocator();
+    const Rest = PositionalOf(.{ .ReminderType = []const []const u8 });
 
-    const r1 = try tstParse(allocator, "program positional1 positional2 positional3", struct {});
+    const r1 = try tstParse(allocator, "program positional1 positional2 positional3", struct {
+        pub const Positionals = Rest;
+    });
     const expectedPositionals: []const []const u8 = &.{ "positional1", "positional2", "positional3" };
     try t.expectEqual({}, r1.positionals.tuple);
-    try t.expectEqualDeep(expectedPositionals, r1.positionals.reminder.?);
+    try t.expectEqualDeep(expectedPositionals, r1.positionals.reminder);
 
-    const r2 = try tstParse(allocator, "program --test positional1 positional2 positional3", struct { @"test": bool = false });
+    const r2 = try tstParse(allocator, "program --test positional1 positional2 positional3", struct {
+        @"test": bool = false,
+        pub const Positionals = Rest;
+    });
     try t.expect(r2.options.@"test");
     try t.expectEqual({}, r2.positionals.tuple);
-    try t.expectEqualDeep(expectedPositionals, r2.positionals.reminder.?);
+    try t.expectEqualDeep(expectedPositionals, r2.positionals.reminder);
 
-    const r3 = try tstParse(allocator, "program -- --test positional1 positional2 positional3", struct { @"test": bool = false });
+    const r3 = try tstParse(allocator, "program -- --test positional1 positional2 positional3", struct {
+        @"test": bool = false,
+        pub const Positionals = Rest;
+    });
     try t.expect(!r3.options.@"test");
     const expectSkip: []const []const u8 = &.{ "--test", "positional1", "positional2", "positional3" };
     try t.expectEqual({}, r3.positionals.tuple);
-    try t.expectEqualDeep(expectSkip, r3.positionals.reminder.?);
+    try t.expectEqualDeep(expectSkip, r3.positionals.reminder);
 
     const r4 = try tstParse(
         allocator,
         "program --test - pos1 verb1 pos2 pos3",
         struct {
             @"test": bool = false,
-            pub const Verb1 = struct {};
+            pub const Positionals = Rest;
+            pub const Verb1 = struct {
+                pub const Positionals = Rest;
+            };
             pub const Verb = union(enum) { verb1: Verb1 };
         },
     );
     try t.expect(r4.options.@"test");
     const expectL1Pos: []const []const u8 = &.{ "-", "pos1" };
     try t.expectEqual({}, r4.positionals.tuple);
-    try t.expectEqualDeep(expectL1Pos, r4.positionals.reminder.?);
+    try t.expectEqualDeep(expectL1Pos, r4.positionals.reminder);
     const expectL2Pos: []const []const u8 = &.{ "pos2", "pos3" };
     try t.expectEqual({}, r4.verb.?.verb1.positionals.tuple);
-    try t.expectEqualDeep(expectL2Pos, r4.verb.?.verb1.positionals.reminder.?);
+    try t.expectEqualDeep(expectL2Pos, r4.verb.?.verb1.positionals.reminder);
 }
 
 test "parse custom positionals" {
@@ -885,7 +899,6 @@ test "parse custom positionals with verb" {
             .ReminderType = void,
         });
         pub const Copy = struct {
-            pub const Positionals = EmptyPositionalsOf;
             pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
                 .ensureCursorDone = false,
             };
@@ -926,6 +939,8 @@ test "parse verb" {
 
         pub const Paste = struct {
             target: []const u8 = undefined,
+
+            pub const Positionals = PositionalOf(.{ .ReminderType = []const []const u8 });
         };
 
         pub const Verb = union(enum) {
@@ -960,7 +975,7 @@ test "parse verb" {
     try t.expectEqualStrings("file4", r5.verb.?.paste.options.target);
     try t.expectEqual(true, r5.options.verbose);
     const expected: []const []const u8 = &.{"positional1"};
-    try t.expectEqualDeep(expected, r5.verb.?.paste.positionals.reminder.?);
+    try t.expectEqualDeep(expected, r5.verb.?.paste.positionals.reminder);
 }
 
 // TODO: move to example
@@ -1201,6 +1216,7 @@ test "parse struct options" {
             origin: Point = .{ .x = 0 },
         };
         pub const Short = .{ .c = .cfg };
+        pub const Positionals = PositionalOf(.{ .ReminderType = []const []const u8 });
     };
 
     var dcur: coll.DebugCursor = .{
@@ -1232,7 +1248,7 @@ test "parse struct options" {
     try t.expectEqual(null, r1.options.maybe);
     try t.expect(r1.options.flag);
     const expectPos: []const []const u8 = &.{"pos"};
-    try t.expectEqualDeep(expectPos, r1.positionals.reminder.?);
+    try t.expectEqualDeep(expectPos, r1.positionals.reminder);
 
     dcur = .{ .data = &.{ "program", "--points", "{x: 4}, {x: 5, y: 6}" } };
     c = dcur.asCursor();
