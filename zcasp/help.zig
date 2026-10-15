@@ -5,7 +5,7 @@ const PositionalOf = @import("positionals.zig").PositionalOf;
 const meta = regent.meta;
 const validate = @import("validate.zig");
 const GroupMatchConfig = validate.GroupMatchConfig;
-const DefaultPosT = @import("spec.zig").defaultPositionals();
+const DefaultPosT = PositionalOf(.{});
 const btType = std.builtin.Type;
 
 pub const HelpConf = struct {
@@ -495,7 +495,10 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             return comptime rt: {
                 const fields = std.meta.fields(Spec);
                 if (fields.len == 0) break :rt null;
-                const OptShortFields: ?[]const btType.StructField = if (@hasDecl(Spec, "Short")) std.meta.fields(@TypeOf(Spec.Short)) else null;
+                const OptShortFields: ?[]const btType.StructField = if (@hasDecl(Spec, "Short"))
+                    std.meta.fields(@TypeOf(Spec.Short))
+                else
+                    null;
 
                 const KV = struct { []const u8, usize };
 
@@ -550,9 +553,48 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             };
         }
 
+        fn tupleDesc(comptime name: []const u8) HelpData(Spec).TupleDesc {
+            return comptime rt: {
+                const TupleDesc = HelpData(Spec).TupleDesc;
+                const empty: TupleDesc = .{ .field = @field(
+                    @FieldType(TupleDesc, "field"),
+                    name,
+                ) };
+                const posDec = Help.positionalsDescription orelse break :rt empty;
+                for (posDec.tuple orelse &.{}) |d| {
+                    if (std.mem.eql(u8, @tagName(d.field), name)) break :rt d;
+                }
+                break :rt empty;
+            };
+        }
+
+        fn reminderDesc() HelpData(Spec).ReminderDesc {
+            return comptime rt: {
+                const posDec = Help.positionalsDescription orelse break :rt .empty;
+                break :rt posDec.reminder orelse .empty;
+            };
+        }
+
+        fn positionalPiece(comptime T: type, comptime desc: anytype) []const u8 {
+            return comptime rt: {
+                const typeName = translateType(T, desc.u8AsChar);
+                const name = desc.name orelse {
+                    if (!desc.typeHint) @compileError(std.fmt.comptimePrint(
+                        "Positional of type {s} has typeHint = false and no name, nothing would be shown",
+                        .{@typeName(T)},
+                    ));
+                    break :rt "<" ++ typeName ++ ">";
+                };
+                break :rt if (desc.typeHint)
+                    "<" ++ name ++ "> (" ++ typeName ++ ")"
+                else
+                    "<" ++ name ++ ">";
+            };
+        }
+
         pub fn positionals() ?[]const u8 {
             return comptime rt: {
-                const posDec = Help.positionalsDescription orelse break :rt null;
+                if (Help.positionalsDescription == null) break :rt null;
 
                 const PosT = if (@hasDecl(Spec, "Positionals")) Spec.Positionals else DefaultPosT;
                 if (PosT.TupleT == void and PosT.ReminderT == void) break :rt null;
@@ -567,33 +609,22 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                 var pieceIdx: usize = 0;
                 if (PosT.TupleT != void) {
                     for (std.meta.fields(PosT.TupleT)) |field| {
-                        typePieces[pieceIdx] = coll.ComptSb.initTup(.{
-                            "<",
-                            translateType(field.type, true),
-                            ">",
-                        }).s;
+                        typePieces[pieceIdx] = positionalPiece(field.type, tupleDesc(field.name));
                         pieceIdx += 1;
                     }
                 }
                 if (PosT.ReminderT != void) {
-                    typePieces[pieceIdx] = coll.ComptSb.initTup(.{
-                        "<",
-                        translateType(PosT.ReminderT, true),
-                        ">",
-                    }).s;
+                    typePieces[pieceIdx] = positionalPiece(PosT.ReminderT, reminderDesc());
                 }
                 const columDelim = columnDelimiter(typePieces);
                 const padding: [conf.indent + columDelim]u8 = @splat(' ');
 
                 if (PosT.TupleT != void) {
                     const fields = std.meta.fields(PosT.TupleT);
-                    for (0..fields.len) |tupIdx| {
+                    for (fields, 0..) |field, tupIdx| {
                         defer if (tupIdx < fields.len - 1) b.append("\n");
 
-                        const tupItemDesc: ?[]const u8 = if (posDec.tuple) |tupDesc| rv: {
-                            if (tupIdx >= tupDesc.len) break :rv null;
-                            break :rv tupDesc[tupIdx];
-                        } else null;
+                        const tupItemDesc = tupleDesc(field.name).description;
 
                         const typePiece = typePieces[tupIdx];
                         const text: ?[]const u8 = if (@typeInfo(fields[tupIdx].type) == .optional)
@@ -622,10 +653,11 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                         innerBlock,
                         rPiece,
                     });
-                    if (posDec.reminder) |rDesc| line.appendAll(.{ &@as(
+
+                    if (reminderDesc().description) |d| line.appendAll(.{ &@as(
                         [columDelim - rPiece.len]u8,
                         @splat(' '),
-                    ), rDesc });
+                    ), d });
                     appendEntry(b, line.s, conf.maxLineLen, &padding);
                 }
 
@@ -676,19 +708,46 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
 }
 
 pub fn HelpData(T: type) type {
+    const PosT = if (@hasDecl(T, "Positionals"))
+        T.Positionals
+    else
+        DefaultPosT;
     return struct {
         const SpecEnum = meta.FieldEnum(T);
         usage: ?[]const []const u8 = null,
         description: ?[]const u8 = null,
         shortDescription: ?[]const u8 = null,
-        positionalsDescription: ?PositionalDescription = null,
+        positionalsDescription: ?PositionalDesc = null,
         examples: ?[]const []const u8 = null,
         optionsDescription: ?[]const FieldDesc = null,
         footer: ?[]const u8 = null,
 
-        pub const PositionalDescription = struct {
-            tuple: ?[]const []const u8 = null,
-            reminder: ?[]const u8 = null,
+        pub const PositionalDesc = struct {
+            tuple: regent.ergo.RotType(
+                PosT.TupleT != void,
+                ?[]const TupleDesc,
+            ) = regent.ergo.rotValue(PosT.TupleT != void, null),
+            reminder: regent.ergo.RotType(
+                PosT.ReminderT != void,
+                ?ReminderDesc,
+            ) = regent.ergo.rotValue(PosT.ReminderT != void, null),
+        };
+
+        pub const TupleDesc = struct {
+            field: meta.FieldEnum(PosT.TupleT),
+            name: ?[]const u8 = null,
+            description: ?[]const u8 = null,
+            typeHint: bool = true,
+            u8AsChar: bool = true,
+        };
+
+        pub const ReminderDesc = struct {
+            name: ?[]const u8 = null,
+            description: ?[]const u8 = null,
+            typeHint: bool = true,
+            u8AsChar: bool = true,
+
+            pub const empty: @This() = .{};
         };
 
         pub const FieldDesc = struct {
@@ -696,7 +755,6 @@ pub fn HelpData(T: type) type {
             description: ?[]const u8 = null,
             defaultHint: bool = true,
             typeHint: bool = true,
-            groupMatchHint: bool = true,
             u8AsChar: bool = true,
         };
     };
@@ -797,9 +855,9 @@ test "positionals" {
         pub const Help: HelpData(@This()) = .{
             .positionalsDescription = .{
                 .tuple = &.{
-                    "src number",
+                    .{ .field = .@"0", .description = "src number" },
                 },
-                .reminder = "file paths",
+                .reminder = .{ .description = "file paths" },
             },
         };
     };
@@ -822,7 +880,7 @@ test "positionals" {
 
         pub const Help: HelpData(@This()) = .{
             .positionalsDescription = .{
-                .reminder = "file paths",
+                .reminder = .{ .description = "file paths" },
             },
         };
     };
@@ -845,7 +903,7 @@ test "positionals" {
         pub const Help: HelpData(@This()) = .{
             .positionalsDescription = .{
                 .tuple = &.{
-                    "src number",
+                    .{ .field = .@"0", .description = "src number" },
                 },
             },
         };
@@ -886,7 +944,10 @@ test "positionals optional" {
     const Spec = struct {
         pub const Positionals = PositionalOf(.{ .TupleType = struct { i32, ?u32, ?bool } });
         pub const Help: HelpData(@This()) = .{
-            .positionalsDescription = .{ .tuple = &.{ "src number", "optional count" } },
+            .positionalsDescription = .{ .tuple = &.{
+                .{ .field = .@"0", .description = "src number" },
+                .{ .field = .@"1", .description = "optional count" },
+            } },
         };
     };
     try t.expectEqualStrings(
@@ -896,6 +957,43 @@ test "positionals optional" {
         \\  <?u32>          optional count
         \\  <?bool>
     , HelpFmt(Spec, .{}).positionals().?);
+}
+
+test "positionals hints" {
+    const t = std.testing;
+
+    const Spec = struct {
+        pub const Positionals = PositionalOf(.{
+            .TupleType = struct { []const u8, u8, ?i32, u8 },
+            .ReminderType = ?[]const []const u8,
+        });
+        pub const Help: HelpData(@This()) = .{ .positionalsDescription = .{
+            .tuple = &.{
+                .{ .field = .@"2", .name = "count", .description = "optional count" },
+                .{ .field = .@"0", .name = "file", .typeHint = false, .description = "input file" },
+                .{ .field = .@"1", .u8AsChar = false },
+            },
+            .reminder = .{ .name = "paths", .description = "rest" },
+        } };
+    };
+    try t.expectEqualStrings(
+        \\Positionals:
+        \\
+        \\  <file>                  [Required] input file
+        \\  <u8>                    [Required]
+        \\  <count> (?i32)          optional count
+        \\  <u8>                    [Required]
+        \\  <paths> (?[][]u8)       rest
+    , HelpFmt(Spec, .{}).positionals().?);
+    try t.expectEqualStrings(
+        \\Positionals:
+        \\
+        \\  <file>                      [Required] input file
+        \\  <int>                       [Required]
+        \\  <count> (?int)              optional count
+        \\  <char>                      [Required]
+        \\  <paths> (?[]string)         rest
+    , HelpFmt(Spec, .{ .simpleTypes = true }).positionals().?);
 }
 
 test "commands" {
@@ -1524,8 +1622,8 @@ test "commands and positionals forced newline alignment" {
         pub const Verb = union(enum) { a: A, bb: B };
         pub const Help: HelpData(@This()) = .{
             .positionalsDescription = .{
-                .tuple = &.{"num\nmore about num"},
-                .reminder = "rest\nof it",
+                .tuple = &.{.{ .field = .@"0", .description = "num\nmore about num" }},
+                .reminder = .{ .description = "rest\nof it" },
             },
         };
     };
@@ -1674,7 +1772,7 @@ test "groupmatch info" {
         pub const Help: HelpData(@This()) = .{
             .optionsDescription = &.{
                 .{ .field = .n1, .description = "n1 desc", .typeHint = false, .defaultHint = false },
-                .{ .field = .n2, .groupMatchHint = false, .typeHint = false, .defaultHint = false },
+                .{ .field = .n2, .typeHint = false, .defaultHint = false },
             },
         };
     }, .{ .headerDelimiter = "", .optionsBreakline = true }).options().?);
@@ -2023,10 +2121,10 @@ test "help" {
             },
             .positionalsDescription = .{
                 .tuple = &.{
-                    "range",
-                    "some string",
+                    .{ .field = .@"0", .description = "range" },
+                    .{ .field = .@"1", .description = "some string" },
                 },
-                .reminder = "reminder",
+                .reminder = .{ .description = "reminder" },
             },
             .optionsDescription = &.{
                 .{ .field = .i1, .description = "i1 desc" },

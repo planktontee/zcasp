@@ -12,6 +12,30 @@ const Optional = regent.meta.Optional;
 const Pointer = regent.meta.Pointer;
 
 pub const PositionalConfig = struct {
+    // Be careful when defining optional type positionals
+    // parsing is done best effort and if a given arg cant be parsed
+    // the positional gets null and the arg is forwarded to the next parser
+    // and this is true for all parse errors except for OutOfMemory
+    // If for some reason the cursor is never consumed but everything is optional
+    // you won't see why the individual parsers failed, you will see (maybe if enabled)
+    // a CursorNotDone at the parent parser, because the fields were made optional so it's
+    // technically not an error. It's hard to debug so be careful with optional tuple positionals.
+    //
+    // Example:
+    //   for: struct { ?u32, i32 }
+    //   args: -1
+    //   result:
+    //     // Overflow
+    //     [0] = null
+    //     [1] = -1
+    //
+    // Example 2:
+    //   for: struct { ?u16, u32 }
+    //   args: 65536
+    //   result:
+    //     // Overflow
+    //     [0] = null
+    //     [1] = 65536
     TupleType: type = void,
     ReminderType: type = void,
     CodecType: type = PrimitiveCodec,
@@ -133,7 +157,9 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
                         allocator,
                         cursor,
                     ) catch |e| v: {
-                        // TODO: better error sieving
+                        if (e == error.OutOfMemory)
+                            return e;
+
                         if (@typeInfo(TupleFieldT) != .optional)
                             return e;
                         break :v null;
