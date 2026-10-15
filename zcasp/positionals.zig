@@ -59,7 +59,7 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
         "Unsupported Reminder type {s}, it has to be a collection",
         .{@typeName(Config.ReminderType)},
     );
-    const ReminderTInfo: std.builtin.Type = reminder_check: switch (@typeInfo(Config.ReminderType)) {
+    const RemChildTInfo: std.builtin.Type = reminder_check: switch (@typeInfo(Config.ReminderType)) {
         .optional => |opt| switch (@typeInfo(opt.child)) {
             .array, .pointer => continue :reminder_check @typeInfo(opt.child),
             else => @compileError(unsupportedMessage),
@@ -75,7 +75,7 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
         const TupleEnum = meta.FieldEnum(TupleT);
         pub const ReminderT = Config.ReminderType;
         const CodecT = Config.CodecType;
-        const InnerList = if (ReminderTInfo == .pointer) std.ArrayListUnmanaged(remindChildT()) else void;
+        const InnerList = if (RemChildTInfo == .pointer) std.ArrayListUnmanaged(remindChildT()) else void;
 
         fn remindChildT() type {
             return rfd: switch (@typeInfo(ReminderT)) {
@@ -90,7 +90,10 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
         }
 
         tuple: TupleT = regent.ergo.rotValue(TupleT != void, undefined),
-        reminder: ReminderT = regent.ergo.rotValue(ReminderT != void, undefined),
+        reminder: ReminderT = regent.ergo.rotValue(
+            ReminderT != void,
+            if (@typeInfo(ReminderT) == .optional) null else undefined,
+        ),
         list: InnerList = regent.ergo.rotValue(InnerList != void, undefined),
         tupleCursor: usize = 0,
         reminderCursor: usize = 0,
@@ -104,7 +107,7 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
         pub const CursorT = coll.Cursor([]const u8);
         pub const Error = error{
             ParseNextCalledOnTupleEnd,
-            ReminderBufferShorterThanArgs,
+            ReminderOverflow,
             ParseNextCalledForEmptyPositional,
         } ||
             CodecT.Error ||
@@ -112,7 +115,7 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
 
         pub const CollectError = error{
             MissingPositionalField,
-            ReminderBufferLongerThanArgs,
+            ReminderArrayNotFilled,
         } || std.mem.Allocator.Error;
 
         // TODO: test this
@@ -138,7 +141,7 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
                     return Error.ParseNextCalledOnTupleEnd;
             } else {
                 if ((comptime TupleT == void) or self.tupleCursor >= self.tuple.len) {
-                    if (ReminderTInfo == .array)
+                    if (RemChildTInfo == .array)
                         try self.nextReminderBuffered(allocator, cursor)
                     else
                         try self.nextReminder(allocator, cursor);
@@ -189,16 +192,31 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
 
         fn nextReminderBuffered(self: *@This(), allocator: *const Allocator, cursor: *CursorT) Error!void {
             _ = cursor.peek() orelse return;
+            if (self.reminderCursor >= RemChildTInfo.array.len)
+                return Error.ReminderOverflow;
 
-            if (self.reminderCursor >= self.reminder.len)
-                return Error.ReminderBufferShorterThanArgs;
-
-            self.reminder[self.reminderCursor] = try self.codec.parseByType(
+            const value = try self.codec.parseByType(
                 remindChildT(),
                 .null,
                 allocator,
                 cursor,
             );
+
+            const RTInfo = @typeInfo(ReminderT);
+            (if (RTInfo != .optional)
+                &self.reminder
+            else v: {
+                if (self.reminder) |*rem|
+                    break :v rem
+                else {
+                    if (regent.ergo.isDebug)
+                        self.reminder = undefined
+                    else
+                        @as([*]u8, @ptrCast(&self.reminder))[@sizeOf(RTInfo.optional.child)] = 0x01;
+
+                    break :v &self.reminder.?;
+                }
+            })[self.reminderCursor] = value;
             self.reminderCursor += 1;
         }
 
@@ -229,8 +247,9 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
             if ((comptime TupleT != void) and !self.stampMissingFields())
                 return CollectError.MissingPositionalField;
 
-            if ((comptime @typeInfo(ReminderT) == .array) and self.reminderCursor < self.reminder.len)
-                return CollectError.ReminderBufferLongerThanArgs;
+            if ((comptime RemChildTInfo == .array) and self.reminderCursor < RemChildTInfo.array.len)
+                if (@typeInfo(ReminderT) != .optional or self.reminder != null)
+                    return CollectError.ReminderArrayNotFilled;
 
             const reminder: ReminderT = if (comptime InnerList == void)
                 self.reminder
@@ -324,7 +343,7 @@ test "parse only buffered reminder" {
     try t.expectEqual({}, p.tuple);
     const expect: []const []const u8 = &.{ "hello", "world!" };
     try t.expectEqualDeep(expect, &p.reminder);
-    try t.expectError(@TypeOf(pos).Error.ReminderBufferShorterThanArgs, pos.parseNextType(allocator, &c));
+    try t.expectError(@TypeOf(pos).Error.ReminderOverflow, pos.parseNextType(allocator, &c));
 }
 
 test "parse short buffered reminder" {
@@ -337,10 +356,10 @@ test "parse short buffered reminder" {
     var cursor = coll.DebugCursor{ .data = &.{ "a", "b" } };
     var c = cursor.asCursor();
     while (c.peek()) |_| try pos.parseNextType(allocator, &c);
-    try t.expectError(Pos.CollectError.ReminderBufferLongerThanArgs, pos.collect(allocator));
+    try t.expectError(Pos.CollectError.ReminderArrayNotFilled, pos.collect(allocator));
 
     var empty: Pos = .{};
-    try t.expectError(Pos.CollectError.ReminderBufferLongerThanArgs, empty.collect(allocator));
+    try t.expectError(Pos.CollectError.ReminderArrayNotFilled, empty.collect(allocator));
 
     var tupled: PositionalOf(.{
         .TupleType = struct { i32 },
@@ -349,7 +368,7 @@ test "parse short buffered reminder" {
     var cursor2 = coll.DebugCursor{ .data = &.{ "1", "x" } };
     var c2 = cursor2.asCursor();
     while (c2.peek()) |_| try tupled.parseNextType(allocator, &c2);
-    try t.expectError(@TypeOf(tupled).CollectError.ReminderBufferLongerThanArgs, tupled.collect(allocator));
+    try t.expectError(@TypeOf(tupled).CollectError.ReminderArrayNotFilled, tupled.collect(allocator));
 }
 
 test "parse dynamic reminder" {
@@ -465,7 +484,37 @@ test "parse tuple stamps missing trailing optionals" {
     cursor = .{ .data = &.{"1"} };
     c = cursor.asCursor();
     while (c.peek()) |_| try required.parseNextType(allocator, &c);
-    try t.expectError(@TypeOf(required).CollectError.MissingPositionalField, required.collect(allocator));
+    try t.expectError(
+        @TypeOf(required).CollectError.MissingPositionalField,
+        required.collect(allocator),
+    );
+}
+
+test "parse reminder stamp missing array" {
+    const allocator = &t.allocator;
+
+    var pos: PositionalOf(.{ .ReminderType = ?[1][]const u8 }) = .{};
+    var cursor = coll.DebugCursor{ .data = &.{} };
+    var c = cursor.asCursor();
+    try pos.parseNextType(allocator, &c);
+    const p = try pos.collect(allocator);
+    try t.expectEqual(null, p.reminder);
+
+    var one: PositionalOf(.{ .ReminderType = ?[1][]const u8 }) = .{};
+    cursor = .{ .data = &.{"a"} };
+    c = cursor.asCursor();
+    while (c.peek()) |_| try one.parseNextType(allocator, &c);
+    const p1 = try one.collect(allocator);
+    try t.expectEqualDeep([1][]const u8{"a"}, p1.reminder.?);
+
+    var short: PositionalOf(.{ .ReminderType = ?[2][]const u8 }) = .{};
+    cursor = .{ .data = &.{"a"} };
+    c = cursor.asCursor();
+    while (c.peek()) |_| try short.parseNextType(allocator, &c);
+    try t.expectError(
+        @TypeOf(short).CollectError.ReminderArrayNotFilled,
+        short.collect(allocator),
+    );
 }
 
 test "parse empty positional" {

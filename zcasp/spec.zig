@@ -882,9 +882,9 @@ test "parse sized reminder must be exact" {
     const r1 = try tstParse(allocator, "program a b", Spec);
     const expect: []const []const u8 = &.{ "a", "b" };
     try t.expectEqualDeep(expect, &r1.positionals.reminder);
-    try t.expectError(Spec.Positionals.CollectError.ReminderBufferLongerThanArgs, tstParse(allocator, "program a", Spec));
-    try t.expectError(Spec.Positionals.CollectError.ReminderBufferLongerThanArgs, tstParse(allocator, "program", Spec));
-    try t.expectError(Spec.Positionals.Error.ReminderBufferShorterThanArgs, tstParse(allocator, "program a b c", Spec));
+    try t.expectError(Spec.Positionals.CollectError.ReminderArrayNotFilled, tstParse(allocator, "program a", Spec));
+    try t.expectError(Spec.Positionals.CollectError.ReminderArrayNotFilled, tstParse(allocator, "program", Spec));
+    try t.expectError(Spec.Positionals.Error.ReminderOverflow, tstParse(allocator, "program a b c", Spec));
 }
 
 test "parse custom positionals with verb" {
