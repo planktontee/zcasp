@@ -22,7 +22,7 @@ const Union = regent.meta.Union;
 
 pub const SpecConfig = struct {
     withProgram: bool = true,
-    withDiagnositcs: bool = false,
+    withDiagnostics: bool = false,
     helpConf: HelpConf = .{},
 };
 
@@ -118,7 +118,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                     .message = help(err),
                 };
 
-                if (comptime conf.withDiagnositcs) {
+                if (comptime conf.withDiagnostics) {
                     const diag: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                     self.lastOpt = diag.lastOpt;
                     self.lastToken = diag.lastToken;
@@ -161,7 +161,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
         }
 
         fn parseWithDiag(self: *@This(), cursor: *CursorT) ?ParseError {
-            if (comptime conf.withDiagnositcs) {
+            if (comptime conf.withDiagnostics) {
                 var diag: coll.DiagnosticsCursor = .{
                     .cursor = cursor,
                 };
@@ -179,7 +179,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
             var positionalOf: PosOf = .{};
 
             while (cursor.next()) |arg| {
-                if (comptime conf.withDiagnositcs) {
+                if (comptime conf.withDiagnostics) {
                     const diag: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                     diag.lastOpt = null;
                 }
@@ -268,7 +268,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                 splitValue = slice[i + 1 ..];
                 cursor.stackItem(splitValue.?);
                 slice = slice[0..i];
-                if (comptime conf.withDiagnositcs) {
+                if (comptime conf.withDiagnostics) {
                     var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                     c.lastToken = splitValue.?;
                 }
@@ -276,7 +276,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
 
             try switch (offset) {
                 2 => rv: {
-                    if (comptime conf.withDiagnositcs) {
+                    if (comptime conf.withDiagnostics) {
                         var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                         c.lastOpt = slice;
                     }
@@ -386,7 +386,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                     };
                     start += optShortArg.?.len;
 
-                    if (comptime conf.withDiagnositcs) {
+                    if (comptime conf.withDiagnostics) {
                         var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                         c.lastOpt = lastArg.arg;
                     }
@@ -413,7 +413,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                     };
 
                     if (start > 0) {
-                        if (comptime conf.withDiagnositcs) {
+                        if (comptime conf.withDiagnostics) {
                             var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                             c.lastOpt = lastArg.arg;
                         }
@@ -435,7 +435,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
 
             // last lastArg set pass
             if (start > 0) {
-                if (comptime conf.withDiagnositcs) {
+                if (comptime conf.withDiagnostics) {
                     var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
                     c.lastOpt = lastArg.arg;
                 }
@@ -495,7 +495,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
 
 const t = std.testing;
 
-const TestSpecConf: SpecConfig = .{ .withDiagnositcs = true };
+const TestSpecConf: SpecConfig = .{ .withDiagnostics = true };
 
 pub fn tstParseSpec(allocator: Allocator, cursor: *coll.Cursor([]const u8), Spec: type) !SpecResponse(Spec, TestSpecConf) {
     var response = SpecResponse(Spec, TestSpecConf).init(allocator);
@@ -529,7 +529,7 @@ test "empty args with default" {
     var cursor = tstCursor.asCursor();
     var response = SpecResponse(Args, .{
         .withProgram = false,
-        .withDiagnositcs = true,
+        .withDiagnostics = true,
     }).init(allocator);
     if (response.parse(&cursor)) |err|
         return err.err;
@@ -1482,7 +1482,7 @@ test "help and inner help" {
     };
     var c = dcur.asCursor();
 
-    const Res = SpecResponse(Spec, .{ .withDiagnositcs = true });
+    const Res = SpecResponse(Spec, .{ .withDiagnostics = true });
     var r = Res.init(t.allocator);
     if (r.parse(&c)) |err| {
         try t.expectEqualStrings(

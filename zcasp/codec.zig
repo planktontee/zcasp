@@ -275,7 +275,8 @@ pub const PrimitiveCodec = struct {
         comptime ensureTypeTag(T, .optional);
         const Tt = comptime @typeInfo(T).optional.child;
 
-        _ = cursor.peek() orelse return Error.ParseOptEndOfIterator;
+        const slice = cursor.peek() orelse return Error.ParseOptEndOfIterator;
+        errdefer cursor.stackItem(slice);
         if (isNull(cursor)) {
             cursor.consume();
             return null;

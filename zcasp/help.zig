@@ -596,21 +596,21 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                         } else null;
 
                         const typePiece = typePieces[tupIdx];
+                        const text: ?[]const u8 = if (@typeInfo(fields[tupIdx].type) == .optional)
+                            tupItemDesc
+                        else if (tupItemDesc) |desc|
+                            "[Required] " ++ desc
+                        else
+                            "[Required]";
 
                         var line = coll.ComptSb.initTup(.{
                             innerBlock,
                             typePiece,
-                            &@as(
-                                [columDelim - typePiece.len]u8,
-                                @splat(' '),
-                            ),
-                            "[Required]",
                         });
-
-                        if (tupItemDesc) |desc| line.appendAll(.{
-                            " ",
-                            desc,
-                        });
+                        if (text) |s| line.appendAll(.{ &@as(
+                            [columDelim - typePiece.len]u8,
+                            @splat(' '),
+                        ), s });
                         appendEntry(b, line.s, conf.maxLineLen, &padding);
                     }
                 }
@@ -878,6 +878,24 @@ test "positionals" {
         \\Positionals:
         \\  <?[]string>
     , HelpFmt(SpecWithoutTupEmptyDesc, .{ .headerDelimiter = "", .simpleTypes = true }).positionals().?);
+}
+
+test "positionals optional" {
+    const t = std.testing;
+
+    const Spec = struct {
+        pub const Positionals = PositionalOf(.{ .TupleType = struct { i32, ?u32, ?bool } });
+        pub const Help: HelpData(@This()) = .{
+            .positionalsDescription = .{ .tuple = &.{ "src number", "optional count" } },
+        };
+    };
+    try t.expectEqualStrings(
+        \\Positionals:
+        \\
+        \\  <i32>           [Required] src number
+        \\  <?u32>          optional count
+        \\  <?bool>
+    , HelpFmt(Spec, .{}).positionals().?);
 }
 
 test "commands" {

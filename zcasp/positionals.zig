@@ -48,6 +48,7 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
 
     return struct {
         pub const TupleT = Config.TupleType;
+        const TupleEnum = meta.FieldEnum(TupleT);
         pub const ReminderT = Config.ReminderType;
         const CodecT = Config.CodecType;
         const InnerList = if (ReminderTInfo == .pointer) std.ArrayListUnmanaged(remindChildT()) else void;
@@ -105,37 +106,66 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
             allocator: *const Allocator,
             cursor: *CursorT,
         ) Error!void {
-            if (comptime TupleT == void and ReminderT == void) return Error.ParseNextCalledForEmptyPositional;
+            if (comptime TupleT == void and ReminderT == void)
+                return Error.ParseNextCalledForEmptyPositional;
+
             if (comptime ReminderT == void) {
-                if (self.tupleCursor >= self.tuple.len) return Error.ParseNextCalledOnTupleEnd;
+                if (self.tupleCursor >= self.tuple.len)
+                    return Error.ParseNextCalledOnTupleEnd;
             } else {
                 if ((comptime TupleT == void) or self.tupleCursor >= self.tuple.len) {
-                    if (ReminderTInfo == .array) {
-                        try self.nextReminderBuffered(allocator, cursor);
-                    } else {
+                    if (ReminderTInfo == .array)
+                        try self.nextReminderBuffered(allocator, cursor)
+                    else
                         try self.nextReminder(allocator, cursor);
-                    }
+
                     return;
                 }
             }
-            const TupleEnum = meta.FieldEnum(TupleT);
+
             switch (@as(TupleEnum, @enumFromInt(self.tupleCursor))) {
-                inline else => |idx| {
-                    self.tuple[@intFromEnum(idx)] = try self.codec.parseByType(
-                        @TypeOf(self.tuple[@intFromEnum(idx)]),
+                inline else => |tupleTTag| {
+                    const p = &self.tuple[@intFromEnum(tupleTTag)];
+                    const TupleFieldT = @TypeOf(p.*);
+                    p.* = self.codec.parseByType(
+                        TupleFieldT,
                         .null,
                         allocator,
                         cursor,
-                    );
+                    ) catch |e| v: {
+                        // TODO: better error sieving
+                        if (@typeInfo(TupleFieldT) != .optional)
+                            return e;
+                        break :v null;
+                    };
                     self.tupleCursor += 1;
                 },
             }
         }
 
+        fn stampMissingFields(self: *@This()) bool {
+            if (self.tupleCursor == self.tuple.len)
+                return true;
+
+            const fields = @typeInfo(TupleT).@"struct".fields;
+            inline for (0.., fields) |i, field| {
+                if (i >= self.tupleCursor) {
+                    if (@typeInfo(field.type) != .optional)
+                        return false;
+
+                    self.tuple[i] = null;
+                }
+            }
+
+            self.tupleCursor = self.tuple.len;
+            return true;
+        }
+
         fn nextReminderBuffered(self: *@This(), allocator: *const Allocator, cursor: *CursorT) Error!void {
             _ = cursor.peek() orelse return;
 
-            if (self.reminderCursor >= self.reminder.len) return Error.ReminderBufferShorterThanArgs;
+            if (self.reminderCursor >= self.reminder.len)
+                return Error.ReminderBufferShorterThanArgs;
 
             self.reminder[self.reminderCursor] = try self.codec.parseByType(
                 remindChildT(),
@@ -170,17 +200,23 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
         }
 
         pub fn collect(self: *@This(), allocator: *const Allocator) CollectError!Positionals {
-            if ((comptime TupleT != void) and self.tupleCursor < self.tuple.len) return CollectError.MissingPositionalField;
-            if ((comptime @typeInfo(ReminderT) == .array) and self.reminderCursor < self.reminder.len) return CollectError.ReminderBufferLongerThanArgs;
-            const reminder: ReminderT = if (comptime InnerList == void) self.reminder else rv: {
+            if ((comptime TupleT != void) and !self.stampMissingFields())
+                return CollectError.MissingPositionalField;
+
+            if ((comptime @typeInfo(ReminderT) == .array) and self.reminderCursor < self.reminder.len)
+                return CollectError.ReminderBufferLongerThanArgs;
+
+            const reminder: ReminderT = if (comptime InnerList == void)
+                self.reminder
+            else v: {
                 if (self.reminderCursor == 0) {
-                    break :rv switch (@typeInfo(ReminderT)) {
+                    break :v switch (@typeInfo(ReminderT)) {
                         .optional => null,
                         else => &.{},
                     };
                 }
-                break :rv if (comptime rfd: switch (@typeInfo(ReminderT)) {
-                    .optional => |opt| continue :rfd @typeInfo(opt.child),
+                break :v if (comptime sent_loop: switch (@typeInfo(ReminderT)) {
+                    .optional => |opt| continue :sent_loop @typeInfo(opt.child),
                     .array => |arrInfo| arrInfo.sentinel(),
                     .pointer => |pInfo| pInfo.sentinel(),
                     else => null,
@@ -362,6 +398,48 @@ test "parse tuple only" {
     try t.expectEqualDeep(@as([]const u4, &.{ 1, 2, 3 }), &p.tuple[2]);
     try t.expectError(@TypeOf(pos).Error.ParseNextCalledOnTupleEnd, pos.parseNextType(allocator, &c));
     try t.expectEqual({}, p.reminder);
+}
+
+test "parse tuple with null" {
+    const allocator = &t.allocator;
+
+    var pos: PositionalOf(.{
+        .TupleType = struct { i32, ?i32, ?bool },
+        .ReminderType = ?[]const []const u8,
+    }) = .{};
+
+    var cursor = coll.DebugCursor{
+        .data = &.{ "-1", "hello" },
+    };
+    var c = cursor.asCursor();
+
+    while (c.peek()) |_| try pos.parseNextType(allocator, &c);
+    const p = try pos.collect(allocator);
+    defer allocator.free(p.reminder.?);
+
+    try t.expectEqual(-1, p.tuple[0]);
+    try t.expectEqual(null, p.tuple[1]);
+    try t.expectEqual(null, p.tuple[2]);
+    try t.expectEqualDeep(@as([]const []const u8, &.{"hello"}), p.reminder.?);
+}
+
+test "parse tuple stamps missing trailing optionals" {
+    const allocator = &t.allocator;
+
+    var pos: PositionalOf(.{ .TupleType = struct { i32, ?i32, ?bool } }) = .{};
+    var cursor = coll.DebugCursor{ .data = &.{"1"} };
+    var c = cursor.asCursor();
+    while (c.peek()) |_| try pos.parseNextType(allocator, &c);
+    const p = try pos.collect(allocator);
+    try t.expectEqual(1, p.tuple[0]);
+    try t.expectEqual(null, p.tuple[1]);
+    try t.expectEqual(null, p.tuple[2]);
+
+    var required: PositionalOf(.{ .TupleType = struct { i32, ?i32, u32 } }) = .{};
+    cursor = .{ .data = &.{"1"} };
+    c = cursor.asCursor();
+    while (c.peek()) |_| try required.parseNextType(allocator, &c);
+    try t.expectError(@TypeOf(required).CollectError.MissingPositionalField, required.collect(allocator));
 }
 
 test "parse empty positional" {
