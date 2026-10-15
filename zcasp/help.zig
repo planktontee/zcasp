@@ -464,6 +464,19 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                 zigTypeTranslation(T);
         }
 
+        fn optionRefs(comptime field: std.builtin.Type.StructField) ?[]const u8 {
+            return comptime rt: {
+                const descriptions = Help.optionsDescription orelse break :rt null;
+                for (descriptions) |desc| {
+                    if (!std.mem.eql(u8, @tagName(desc.field), field.name)) continue;
+                    const refs = desc.refs orelse break :rt null;
+                    if (refs.len == 0) break :rt null;
+                    break :rt valueRefs(refs);
+                }
+                break :rt null;
+            };
+        }
+
         pub fn typeHint(
             comptime field: std.builtin.Type.StructField,
         ) ?[]const u8 {
@@ -509,6 +522,7 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
 
                     piece.appendAll(.{ "--", field.name });
 
+                    if (optionRefs(field)) |refs| piece.appendAll(.{ " ", refs });
                     if (typeHint(field)) |tpHint| piece.appendAll(.{ " ", tpHint });
 
                     optionPieces[i] = piece.s;
@@ -575,20 +589,32 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             };
         }
 
+        fn valueRefs(comptime refs: []const []const u8) []const u8 {
+            return comptime rt: {
+                var b = coll.ComptSb.init("");
+                for (refs, 0..) |ref, i| {
+                    if (i > 0) b.append(" ");
+                    b.appendAll(.{ "<", ref, ">" });
+                }
+                break :rt b.s;
+            };
+        }
+
         fn positionalPiece(comptime T: type, comptime desc: anytype) []const u8 {
             return comptime rt: {
                 const typeName = translateType(T, desc.u8AsChar);
-                const name = desc.name orelse {
+                const refs = desc.refs orelse &.{};
+                if (refs.len == 0) {
                     if (!desc.typeHint) @compileError(std.fmt.comptimePrint(
-                        "Positional of type {s} has typeHint = false and no name, nothing would be shown",
+                        "Positional of type {s} has typeHint = false and no refs, nothing would be shown",
                         .{@typeName(T)},
                     ));
                     break :rt "<" ++ typeName ++ ">";
-                };
+                }
                 break :rt if (desc.typeHint)
-                    "<" ++ name ++ "> (" ++ typeName ++ ")"
+                    valueRefs(refs) ++ " (" ++ typeName ++ ")"
                 else
-                    "<" ++ name ++ ">";
+                    valueRefs(refs);
             };
         }
 
@@ -735,14 +761,14 @@ pub fn HelpData(T: type) type {
 
         pub const TupleDesc = struct {
             field: meta.FieldEnum(PosT.TupleT),
-            name: ?[]const u8 = null,
+            refs: ?[]const []const u8 = null,
             description: ?[]const u8 = null,
             typeHint: bool = true,
             u8AsChar: bool = true,
         };
 
         pub const ReminderDesc = struct {
-            name: ?[]const u8 = null,
+            refs: ?[]const []const u8 = null,
             description: ?[]const u8 = null,
             typeHint: bool = true,
             u8AsChar: bool = true,
@@ -752,6 +778,7 @@ pub fn HelpData(T: type) type {
 
         pub const FieldDesc = struct {
             field: SpecEnum,
+            refs: ?[]const []const u8 = null,
             description: ?[]const u8 = null,
             defaultHint: bool = true,
             typeHint: bool = true,
@@ -969,11 +996,11 @@ test "positionals hints" {
         });
         pub const Help: HelpData(@This()) = .{ .positionalsDescription = .{
             .tuple = &.{
-                .{ .field = .@"2", .name = "count", .description = "optional count" },
-                .{ .field = .@"0", .name = "file", .typeHint = false, .description = "input file" },
+                .{ .field = .@"2", .refs = &.{"count"}, .description = "optional count" },
+                .{ .field = .@"0", .refs = &.{"file"}, .typeHint = false, .description = "input file" },
                 .{ .field = .@"1", .u8AsChar = false },
             },
-            .reminder = .{ .name = "paths", .description = "rest" },
+            .reminder = .{ .refs = &.{"paths"}, .description = "rest" },
         } };
     };
     try t.expectEqualStrings(
@@ -994,6 +1021,43 @@ test "positionals hints" {
         \\  <char>                      [Required]
         \\  <paths> (?[]string)         rest
     , HelpFmt(Spec, .{ .simpleTypes = true }).positionals().?);
+}
+
+test "value refs" {
+    const t = std.testing;
+
+    const Spec = struct {
+        file: []const u8 = "-",
+        delta: Delta = .{},
+        verbose: bool = false,
+
+        pub const Delta = struct { dx: i32 = 0, dy: i32 = 0 };
+        pub const Short = .{ .v = .delta };
+        pub const Positionals = PositionalOf(.{ .TupleType = struct { struct { i32, i32 }, []const u8 } });
+        pub const Help: HelpData(@This()) = .{
+            .optionsDescription = &.{
+                .{ .field = .file, .refs = &.{"path"}, .description = "input" },
+                .{ .field = .delta, .refs = &.{ "dx", "dy" }, .typeHint = false, .defaultHint = false, .description = "move by" },
+            },
+            .positionalsDescription = .{ .tuple = &.{
+                .{ .field = .@"0", .refs = &.{ "x", "y" }, .typeHint = false, .description = "point" },
+                .{ .field = .@"1", .refs = &.{"label"} },
+            } },
+        };
+    };
+    try t.expectEqualStrings(
+        \\Options:
+        \\
+        \\  --file <path> ([]u8 = "-")      input
+        \\  -v, --delta <dx> <dy>           move by
+        \\  --verbose
+    , HelpFmt(Spec, .{}).options().?);
+    try t.expectEqualStrings(
+        \\Positionals:
+        \\
+        \\  <x> <y>             [Required] point
+        \\  <label> ([]u8)      [Required]
+    , HelpFmt(Spec, .{}).positionals().?);
 }
 
 test "commands" {
