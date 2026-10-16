@@ -130,7 +130,7 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
 
         pub fn parseNextType(
             self: *@This(),
-            allocator: *const Allocator,
+            allocator: Allocator,
             cursor: *CursorT,
         ) Error!void {
             if (comptime TupleT == void and ReminderT == void)
@@ -190,7 +190,7 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
             return true;
         }
 
-        fn nextReminderBuffered(self: *@This(), allocator: *const Allocator, cursor: *CursorT) Error!void {
+        fn nextReminderBuffered(self: *@This(), allocator: Allocator, cursor: *CursorT) Error!void {
             _ = cursor.peek() orelse return;
             if (self.reminderCursor >= RemChildTInfo.array.len)
                 return Error.ReminderOverflow;
@@ -220,10 +220,10 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
             self.reminderCursor += 1;
         }
 
-        fn nextReminder(self: *@This(), allc: *const Allocator, cursor: *CursorT) Error!void {
+        fn nextReminder(self: *@This(), allc: Allocator, cursor: *CursorT) Error!void {
             if (cursor.peek() == null) return;
 
-            const allocator = allc.*;
+            const allocator = allc;
             if (self.reminderCursor == 0) {
                 if (comptime InnerList == void) {
                     @compileError("Unsupported call to nextReminder with non inner list");
@@ -243,7 +243,7 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
             self.reminderCursor += 1;
         }
 
-        pub fn collect(self: *@This(), allocator: *const Allocator) CollectError!Positionals {
+        pub fn collect(self: *@This(), allocator: Allocator) CollectError!Positionals {
             if ((comptime TupleT != void) and !self.stampMissingFields())
                 return CollectError.MissingPositionalField;
 
@@ -266,9 +266,9 @@ pub fn PositionalOf(comptime Config: PositionalConfig) type {
                     .pointer => |pInfo| pInfo.sentinel(),
                     else => null,
                 }) |sentinel|
-                    try self.list.toOwnedSliceSentinel(allocator.*, sentinel)
+                    try self.list.toOwnedSliceSentinel(allocator, sentinel)
                 else
-                    try self.list.toOwnedSlice(allocator.*);
+                    try self.list.toOwnedSlice(allocator);
             };
             return .{
                 .tuple = self.tuple,
@@ -285,12 +285,12 @@ test "empty reminder" {
         .ReminderType = []const []const u8,
     }) = .{};
 
-    const p = try pos.collect(&t.allocator);
+    const p = try pos.collect(t.allocator);
     try t.expectEqualDeep(&.{}, p.reminder);
 
     var pos2: PositionalOf(.{ .ReminderType = ?[]const []const u8 }) = .{};
 
-    const p2 = try pos2.collect(&t.allocator);
+    const p2 = try pos2.collect(t.allocator);
     try t.expectEqual(null, p2.reminder);
 }
 
@@ -311,8 +311,8 @@ test "parse positionals tuple" {
     };
     var c = cursor.asCursor();
 
-    while (c.peek()) |_| try pos.parseNextType(&t.allocator, &c);
-    const p = try pos.collect(&t.allocator);
+    while (c.peek()) |_| try pos.parseNextType(t.allocator, &c);
+    const p = try pos.collect(t.allocator);
 
     try t.expectEqual(-13, p.tuple[0]);
     try t.expectEqual(false, p.tuple[1]);
@@ -322,7 +322,7 @@ test "parse positionals tuple" {
 }
 
 test "parse only buffered reminder" {
-    const allocator = &t.allocator;
+    const allocator = t.allocator;
 
     var pos: PositionalOf(.{
         .ReminderType = [2][]const u8,
@@ -347,7 +347,7 @@ test "parse only buffered reminder" {
 }
 
 test "parse short buffered reminder" {
-    const allocator = &t.allocator;
+    const allocator = t.allocator;
     const Pos = PositionalOf(.{
         .ReminderType = [3][]const u8,
     });
@@ -372,7 +372,7 @@ test "parse short buffered reminder" {
 }
 
 test "parse dynamic reminder" {
-    const allocator = &t.allocator;
+    const allocator = t.allocator;
 
     var pos: PositionalOf(.{ .ReminderType = ?[]const []const u8 }) = .{};
     var cursor = coll.DebugCursor{
@@ -386,7 +386,7 @@ test "parse dynamic reminder" {
 
     while (c.peek()) |_| try pos.parseNextType(allocator, &c);
 
-    const p = try pos.collect(&t.allocator);
+    const p = try pos.collect(t.allocator);
     defer allocator.free(p.reminder.?);
 
     try t.expectEqual({}, p.tuple);
@@ -395,7 +395,7 @@ test "parse dynamic reminder" {
 }
 
 test "parse sentinel reminder" {
-    const allocator = &t.allocator;
+    const allocator = t.allocator;
 
     inline for (.{ [:0]const i32, ?[:0]const i32 }) |R| {
         var pos: PositionalOf(.{ .ReminderType = R }) = .{};
@@ -417,7 +417,7 @@ test "parse sentinel reminder" {
 }
 
 test "parse tuple only" {
-    const allocator = &t.allocator;
+    const allocator = t.allocator;
 
     var pos: PositionalOf(.{
         .TupleType = struct { i32, bool, [3]u4 },
@@ -446,7 +446,7 @@ test "parse tuple only" {
 }
 
 test "parse tuple with null" {
-    const allocator = &t.allocator;
+    const allocator = t.allocator;
 
     var pos: PositionalOf(.{
         .TupleType = struct { i32, ?i32, ?bool },
@@ -469,7 +469,7 @@ test "parse tuple with null" {
 }
 
 test "parse tuple stamps missing trailing optionals" {
-    const allocator = &t.allocator;
+    const allocator = t.allocator;
 
     var pos: PositionalOf(.{ .TupleType = struct { i32, ?i32, ?bool } }) = .{};
     var cursor = coll.DebugCursor{ .data = &.{"1"} };
@@ -491,7 +491,7 @@ test "parse tuple stamps missing trailing optionals" {
 }
 
 test "parse reminder stamp missing array" {
-    const allocator = &t.allocator;
+    const allocator = t.allocator;
 
     var pos: PositionalOf(.{ .ReminderType = ?[1][]const u8 }) = .{};
     var cursor = coll.DebugCursor{ .data = &.{} };
@@ -518,7 +518,7 @@ test "parse reminder stamp missing array" {
 }
 
 test "parse empty positional" {
-    const allocator = &t.allocator;
+    const allocator = t.allocator;
 
     var cursor = coll.DebugCursor{
         .data = &.{},
@@ -537,7 +537,7 @@ test "parse empty positional" {
 }
 
 test "custom codec doubles i32 tuple input" {
-    const allocator = &t.allocator;
+    const allocator = t.allocator;
 
     const CustomCodec = struct {
         pub const Error = error{ InvalidType, ParseIntError } || std.fmt.ParseIntError;
@@ -545,7 +545,7 @@ test "custom codec doubles i32 tuple input" {
             self: *const @This(),
             comptime T: type,
             _: anytype,
-            allc: *const std.mem.Allocator,
+            allc: std.mem.Allocator,
             cursor: *coll.Cursor([]const u8),
         ) Error!T {
             _ = self;

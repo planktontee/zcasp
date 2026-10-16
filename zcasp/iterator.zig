@@ -5,9 +5,9 @@ const Allocator = std.mem.Allocator;
 pub const TstArgCursor = struct {
     iterator: std.process.Args.IteratorGeneral(.{}),
 
-    pub fn init(allocator: *const Allocator, data: [:0]const u8) !@This() {
+    pub fn init(allocator: Allocator, data: [:0]const u8) !@This() {
         return .{
-            .iterator = try .init(allocator.*, data),
+            .iterator = try .init(allocator, data),
         };
     }
 
@@ -33,7 +33,7 @@ pub const TstArgCursor = struct {
 
 test "arg cursor peek" {
     const allocator = std.testing.allocator;
-    var tstCursor = try TstArgCursor.init(&allocator,
+    var tstCursor = try TstArgCursor.init(allocator,
         \\Hello
         \\World
     );
@@ -50,7 +50,7 @@ test "arg cursor peek" {
 
 test "arg cursor peek with stackItem" {
     const allocator = std.testing.allocator;
-    var tstCursor = try TstArgCursor.init(&allocator, "");
+    var tstCursor = try TstArgCursor.init(allocator, "");
     defer tstCursor.deinit();
     var cursor = tstCursor.asCursor();
 
@@ -775,24 +775,24 @@ test "simple array iterator" {
     try t.expectEqual(null, try iterator.next());
 }
 
-fn tstCollectTokens(allocator: *const Allocator, slice: []const u8) ![]const []const u8 {
-    var result = try std.ArrayListUnmanaged([]const u8).initCapacity(allocator.*, slice.len);
+fn tstCollectTokens(allocator: Allocator, slice: []const u8) ![]const []const u8 {
+    var result = try std.ArrayListUnmanaged([]const u8).initCapacity(allocator, slice.len);
     var tokenizer = AtDepthArrayTokenizer.init(slice);
 
     while (try tokenizer.next()) |item| {
-        try result.append(allocator.*, item);
+        try result.append(allocator, item);
     }
 
-    return result.toOwnedSlice(allocator.*);
+    return result.toOwnedSlice(allocator);
 }
 
 test "Depth 1 Array tokenizer (non-string)" {
     const t = std.testing;
     const E = AtDepthArrayTokenizer.Error;
-    const base = &std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
-    const allocator = &arena.allocator();
+    const allocator = arena.allocator();
 
     try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, "]"));
     try t.expectError(E.MissingArrayLayer, tstCollectTokens(allocator, " ]"));
@@ -949,10 +949,10 @@ test "Depth 1 Array tokenizer (non-string)" {
 test "Depth 2+ Array tokenizer (non-string)" {
     const t = std.testing;
     const E = AtDepthArrayTokenizer.Error;
-    const base = &std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
-    const allocator = &arena.allocator();
+    const allocator = arena.allocator();
 
     const expectOneEmpty: []const []const u8 = &.{"[]"};
     try t.expectEqualDeep(expectOneEmpty, try tstCollectTokens(allocator, "[[]]"));
@@ -1068,10 +1068,10 @@ test "Depth 2+ Array tokenizer (non-string)" {
 test "Depth 1 Array tokenizer (strings)" {
     const t = std.testing;
     const E = AtDepthArrayTokenizer.Error;
-    const base = &std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
-    const allocator = &arena.allocator();
+    const allocator = arena.allocator();
 
     const expectEmptyString: []const []const u8 = &.{""};
     try t.expectEqualDeep(expectEmptyString, try tstCollectTokens(allocator, "[ '' ]"));
@@ -1157,10 +1157,10 @@ test "Depth 1 Array tokenizer (strings)" {
 
 test "Depth 2+ Array tokenizer (strings)" {
     const t = std.testing;
-    const base = &std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
-    const allocator = &arena.allocator();
+    const allocator = arena.allocator();
 
     const expectInnerQuoted: []const []const u8 = &.{ "[1, 'a']", "[2, 'b']" };
     try t.expectEqualDeep(expectInnerQuoted, try tstCollectTokens(allocator, "[[1, 'a'], [2, 'b']]"));
@@ -1184,10 +1184,10 @@ test "Depth 2+ Array tokenizer (strings)" {
 test "Any depth any match tricky cases" {
     const t = std.testing;
     const E = AtDepthArrayTokenizer.Error;
-    const base = &std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
-    const allocator = &arena.allocator();
+    const allocator = arena.allocator();
 
     try t.expectError(E.SyntaxError, tstCollectTokens(allocator, "['a', 'b']['c', 'd']"));
     // Sanitization of inner-level doesn't happen at top-level
@@ -1221,24 +1221,24 @@ test "Any depth any match tricky cases" {
     try t.expectEqualDeep(expectTricky7, try tstCollectTokens(allocator, "[1, 2, '3, [4, 5]']"));
 }
 
-fn tstCollectFields(allocator: *const Allocator, slice: []const u8) ![]const AtDepthStructTokenizer.Field {
-    var result = try std.ArrayListUnmanaged(AtDepthStructTokenizer.Field).initCapacity(allocator.*, 8);
+fn tstCollectFields(allocator: Allocator, slice: []const u8) ![]const AtDepthStructTokenizer.Field {
+    var result = try std.ArrayListUnmanaged(AtDepthStructTokenizer.Field).initCapacity(allocator, 8);
     var tokenizer = AtDepthStructTokenizer.init(slice);
 
     while (try tokenizer.next()) |item| {
-        try result.append(allocator.*, item);
+        try result.append(allocator, item);
     }
 
-    return result.toOwnedSlice(allocator.*);
+    return result.toOwnedSlice(allocator);
 }
 
 test "Array tokenizer double quotes and nested structs" {
     const t = std.testing;
     const E = AtDepthArrayTokenizer.Error;
-    const base = &std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
-    const allocator = &arena.allocator();
+    const allocator = arena.allocator();
 
     const expectTwo: []const []const u8 = &.{ "a", "b" };
     try t.expectEqualDeep(expectTwo, try tstCollectTokens(allocator, "[\"a\", \"b\"]"));
@@ -1267,10 +1267,10 @@ test "Struct tokenizer" {
     const t = std.testing;
     const E = AtDepthStructTokenizer.Error;
     const F = AtDepthStructTokenizer.Field;
-    const base = &std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
-    const allocator = &arena.allocator();
+    const allocator = arena.allocator();
 
     const expectEmpty: []const F = &.{};
     try t.expectEqualDeep(expectEmpty, try tstCollectFields(allocator, "{}"));
@@ -1346,10 +1346,10 @@ test "Struct tokenizer" {
 test "Array tokenizer phantom structs" {
     const t = std.testing;
     const E = AtDepthArrayTokenizer.Error;
-    const base = &std.testing.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = std.testing.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
-    const allocator = &arena.allocator();
+    const allocator = arena.allocator();
 
     const expectOne: []const []const u8 = &.{"{\"a\": 1}"};
     try t.expectEqualDeep(expectOne, try tstCollectTokens(allocator, "{\"a\": 1}"));

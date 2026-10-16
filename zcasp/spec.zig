@@ -175,7 +175,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
             if (comptime @FieldType(@This(), "program") != void)
                 self.program = cursor.next() orelse return .ErrOf(error.MissingProgram, cursor);
 
-            const allocator = &self.arena.allocator();
+            const allocator = self.arena.allocator();
             var positionalOf: PosOf = .{};
 
             while (cursor.next()) |arg| {
@@ -468,7 +468,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                     @field(self.options, f.name) = try self.codec.parseByType(
                         @FieldType(Spec, f.name),
                         tag,
-                        &self.arena.allocator(),
+                        self.arena.allocator(),
                         cursor,
                     );
 
@@ -508,14 +508,14 @@ pub fn tstParseSpec(allocator: Allocator, cursor: *coll.Cursor([]const u8), Spec
 }
 
 fn tstParse(allocator: Allocator, data: [:0]const u8, Spec: type) !SpecResponse(Spec, TestSpecConf) {
-    var tstCursor = try TstArgCursor.init(&allocator, data);
+    var tstCursor = try TstArgCursor.init(allocator, data);
     var cursor = tstCursor.asCursor();
     return try tstParseSpec(allocator, &cursor, Spec);
 }
 
 test "empty args with default" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -525,7 +525,7 @@ test "empty args with default" {
 
     try t.expectError(error.MissingProgram, tstParse(allocator, "", Args));
 
-    var tstCursor = try TstArgCursor.init(&allocator, "");
+    var tstCursor = try TstArgCursor.init(allocator, "");
     var cursor = tstCursor.asCursor();
     var response = SpecResponse(Args, .{
         .withProgram = false,
@@ -539,8 +539,8 @@ test "empty args with default" {
 }
 
 test "program only" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -549,8 +549,8 @@ test "program only" {
 }
 
 test "parse named" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -571,8 +571,8 @@ test "parse named" {
 }
 
 test "parsed chained flags" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -600,8 +600,8 @@ test "parsed chained flags" {
 }
 
 test "parsed glued arg/param chain" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -626,8 +626,8 @@ test "parsed glued arg/param chain" {
 }
 
 test "parse short arg" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -656,8 +656,8 @@ test "parse short arg" {
 }
 
 test "parse different types" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -741,8 +741,8 @@ test "parse different types" {
 }
 
 test "parse kvargs" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -767,8 +767,8 @@ test "parse kvargs" {
 }
 
 test "parse glued named arg" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -781,8 +781,8 @@ test "parse glued named arg" {
 }
 
 test "parse positionals" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
     const Rest = PositionalOf(.{ .ReminderType = []const []const u8 });
@@ -833,8 +833,8 @@ test "parse positionals" {
 }
 
 test "parse custom positionals" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -868,8 +868,8 @@ test "parse custom positionals" {
 }
 
 test "parse sized reminder must be exact" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -888,8 +888,8 @@ test "parse sized reminder must be exact" {
 }
 
 test "parse custom positionals with verb" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -925,8 +925,8 @@ test "parse custom positionals with verb" {
 }
 
 test "parse verb" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -1015,7 +1015,7 @@ test "parse with custom codec" {
                 self: *@This(),
                 comptime Tx: type,
                 comptime tag: SpecFieldEnum,
-                allc: *const Allocator,
+                allc: Allocator,
                 crsor: *CodecIn.CursorT,
             ) Error!Tx {
                 if (comptime !supports(Tx, tag)) {
@@ -1050,7 +1050,7 @@ test "parse with custom codec" {
                 self: *@This(),
                 comptime Tx: type,
                 comptime tag: SpecFieldEnum,
-                allc: *const Allocator,
+                allc: Allocator,
                 cursor: *CodecIn.CursorT,
             ) Error!Tx {
                 var r: Tx = 0;
@@ -1124,7 +1124,7 @@ test "parse verb with custom codec" {
                     self: *@This(),
                     comptime Tx: type,
                     comptime tag: SpecFieldEnum,
-                    allc: *const Allocator,
+                    allc: Allocator,
                     crsor: *CodecIn.CursorT,
                 ) Error!Tx {
                     if (comptime !supports(Tx, tag)) {
@@ -1144,7 +1144,7 @@ test "parse verb with custom codec" {
                 pub fn parsePath(
                     self: *@This(),
                     comptime Tx: type,
-                    allc: *const Allocator,
+                    allc: Allocator,
                     crsor: *CodecIn.CursorT,
                 ) Error!Tx {
                     _ = self;
@@ -1299,7 +1299,7 @@ test "parse struct options with custom codec" {
                 self: *@This(),
                 comptime Tx: type,
                 comptime tag: SpecFieldEnum,
-                allc: *const Allocator,
+                allc: Allocator,
                 crsor: *CodecIn.CursorT,
             ) Error!Tx {
                 if (comptime !supports(Tx, tag)) {
@@ -1345,8 +1345,8 @@ test "parse struct options with custom codec" {
 }
 
 test "untyped group match error set reaches spec" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -1395,8 +1395,8 @@ test "untyped group match error set reaches spec" {
 }
 
 test "validate require" {
-    const base = &t.allocator;
-    var arena = std.heap.ArenaAllocator.init(base.*);
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
     defer arena.deinit();
     const allocator = arena.allocator();
 
@@ -1423,7 +1423,7 @@ test "validate require" {
 
 test "parsed spec cleanup with verb" {
     const allocator = t.allocator;
-    var tstCursor = try TstArgCursor.init(&allocator,
+    var tstCursor = try TstArgCursor.init(allocator,
         \\program
         \\--verbose
         \\copy
