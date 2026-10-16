@@ -1355,7 +1355,7 @@ test "untyped group match error set reaches spec" {
         b: ?u32 = null,
 
         fn validateArgs(set: validate.FieldBitSet(@This())) !void {
-            if (!set.oneOf(.{ .a, .b })) return error.NeedExactlyOneOfAB;
+            if (!set.oneOf(&.{ .a, .b })) return error.NeedExactlyOneOfAB;
         }
 
         pub const GroupMatch: GroupMatchConfig(@This(), validateArgs) = .{};
@@ -1458,7 +1458,7 @@ test "help and inner help" {
             };
 
             pub fn checkFields(set: validate.FieldBitSet(@This())) !void {
-                if (!set.allOf(.{.path}))
+                if (set.isFieldMissing(.path))
                     return error.RequiredArgsMissing;
             }
 

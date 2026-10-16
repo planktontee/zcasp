@@ -10,39 +10,46 @@ pub fn FieldBitSet(Spec: type) type {
         bitset: BitSet = BitSet.initEmpty(),
 
         pub fn fieldSet(self: *@This(), comptime tag: SpecEnumFields) void {
-            const i = comptime std.meta.fieldIndex(Spec, @tagName(tag)) orelse @compileError(std.fmt.comptimePrint(
-                "Invalid tag {s} for Spec {s}",
-                .{ @tagName(tag), @typeName(Spec) },
-            ));
+            const i = comptime std.meta.fieldIndex(Spec, @tagName(tag)).?;
             self.bitset.set(i);
         }
 
         pub fn isFieldSet(self: *const @This(), comptime tag: SpecEnumFields) bool {
-            const i = comptime std.meta.fieldIndex(Spec, @tagName(tag)) orelse @compileError(std.fmt.comptimePrint(
-                "Invalid tag {s} for Spec {s}",
-                .{ @tagName(tag), @typeName(Spec) },
-            ));
+            const i = comptime std.meta.fieldIndex(Spec, @tagName(tag)).?;
             return self.bitset.isSet(i);
         }
 
-        fn makeMask(comptime tags: anytype) BitSet {
+        pub fn isFieldMissing(self: *const @This(), comptime tag: SpecEnumFields) bool {
+            return !self.isFieldSet(tag);
+        }
+
+        fn makeMask(comptime tags: []const SpecEnumFields) BitSet {
             var tmp = BitSet.initEmpty();
             for (tags) |tag| {
-                const i = std.meta.fieldIndex(Spec, @tagName(tag)) orelse @compileError(std.fmt.comptimePrint(
-                    "Invalid tag {s} for Spec {s}",
-                    .{ @tagName(tag), @typeName(Spec) },
-                ));
+                const i = std.meta.fieldIndex(Spec, @tagName(tag)).?;
                 tmp.set(i);
             }
             return tmp;
         }
 
-        pub fn allOf(self: *const @This(), comptime tags: anytype) bool {
+        pub fn allOf(self: *const @This(), comptime tags: []const SpecEnumFields) bool {
             return self.bitset.supersetOf(comptime makeMask(tags));
         }
 
-        pub fn oneOf(self: *const @This(), comptime tags: anytype) bool {
-            return self.bitset.intersectWith(comptime makeMask(tags)).count() == 1;
+        pub fn count(self: *const @This()) usize {
+            return self.bitset.count();
+        }
+
+        pub fn countOf(self: *const @This(), comptime tags: []const SpecEnumFields) usize {
+            return self.bitset.intersectWith(comptime makeMask(tags)).count();
+        }
+
+        pub fn oneOf(self: *const @This(), comptime tags: []const SpecEnumFields) bool {
+            return self.countOf(tags) == 1;
+        }
+
+        pub fn anyOf(self: *const @This(), comptime tags: []const SpecEnumFields) bool {
+            return self.countOf(tags) >= 1;
         }
     };
 }
@@ -63,21 +70,37 @@ test "track bits for field" {
     try t.expect(!fbset.isFieldSet(.b));
     try t.expect(fbset.isFieldSet(.c));
 
-    try t.expectEqual(true, fbset.allOf(.{.a}));
-    try t.expectEqual(false, fbset.allOf(.{.b}));
-    try t.expectEqual(true, fbset.allOf(.{.c}));
-    try t.expectEqual(false, fbset.allOf(.{ .a, .b }));
-    try t.expectEqual(true, fbset.allOf(.{ .a, .c }));
-    try t.expectEqual(false, fbset.allOf(.{ .b, .c }));
-    try t.expectEqual(false, fbset.allOf(.{ .a, .b, .c }));
+    try t.expectEqual(true, fbset.allOf(&.{.a}));
+    try t.expectEqual(false, fbset.allOf(&.{.b}));
+    try t.expectEqual(true, fbset.allOf(&.{.c}));
+    try t.expectEqual(false, fbset.allOf(&.{ .a, .b }));
+    try t.expectEqual(true, fbset.allOf(&.{ .a, .c }));
+    try t.expectEqual(false, fbset.allOf(&.{ .b, .c }));
+    try t.expectEqual(false, fbset.allOf(&.{ .a, .b, .c }));
 
-    try t.expectEqual(true, fbset.oneOf(.{.a}));
-    try t.expectEqual(false, fbset.oneOf(.{.b}));
-    try t.expectEqual(true, fbset.oneOf(.{.c}));
-    try t.expectEqual(true, fbset.oneOf(.{ .a, .b }));
-    try t.expectEqual(false, fbset.oneOf(.{ .a, .c }));
-    try t.expectEqual(true, fbset.oneOf(.{ .b, .c }));
-    try t.expectEqual(false, fbset.oneOf(.{ .a, .b, .c }));
+    try t.expectEqual(true, fbset.oneOf(&.{.a}));
+    try t.expectEqual(false, fbset.oneOf(&.{.b}));
+    try t.expectEqual(true, fbset.oneOf(&.{.c}));
+    try t.expectEqual(true, fbset.oneOf(&.{ .a, .b }));
+    try t.expectEqual(false, fbset.oneOf(&.{ .a, .c }));
+    try t.expectEqual(true, fbset.oneOf(&.{ .b, .c }));
+    try t.expectEqual(false, fbset.oneOf(&.{ .a, .b, .c }));
+
+    try t.expect(!fbset.isFieldMissing(.a));
+    try t.expect(fbset.isFieldMissing(.b));
+
+    try t.expectEqual(2, fbset.count());
+    try t.expectEqual(0, fbset.countOf(&.{}));
+    try t.expectEqual(0, fbset.countOf(&.{.b}));
+    try t.expectEqual(1, fbset.countOf(&.{ .a, .b }));
+    try t.expectEqual(2, fbset.countOf(&.{ .a, .c }));
+    try t.expectEqual(2, fbset.countOf(&.{ .a, .b, .c }));
+
+    try t.expectEqual(false, fbset.anyOf(&.{}));
+    try t.expectEqual(false, fbset.anyOf(&.{.b}));
+    try t.expectEqual(true, fbset.anyOf(&.{ .a, .b }));
+    try t.expectEqual(true, fbset.anyOf(&.{ .a, .c }));
+    try t.expectEqual(true, fbset.anyOf(&.{ .a, .b, .c }));
 }
 
 pub fn GroupMatchConfig(Spec: type, comptime extra: anytype) type {
@@ -204,7 +227,7 @@ test "untyped group match derives validateFn error set" {
         b: ?u32 = null,
 
         fn validateArgs(set: FieldBitSet(@This())) !void {
-            if (!set.oneOf(.{ .a, .b })) return error.NeedExactlyOneOfAB;
+            if (!set.oneOf(&.{ .a, .b })) return error.NeedExactlyOneOfAB;
         }
 
         pub const GroupMatch: GroupMatchConfig(@This(), validateArgs) = .{
