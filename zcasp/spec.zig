@@ -20,6 +20,8 @@ const ArgCodec = argCodec.ArgCodec;
 const Result = regent.result.Result;
 const Union = regent.meta.Union;
 
+pub const CursorT = coll.Cursor([]const u8);
+
 pub const SpecConfig = struct {
     withProgram: bool = true,
     withDiagnostics: bool = false,
@@ -72,7 +74,6 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
         }
 
         pub const Options = Spec;
-        const CursorT = coll.Cursor([]const u8);
         pub const VerbT = if (@hasDecl(Spec, "Verb")) SpecUnionVerbs() else void;
         const PosOf = if (@hasDecl(Spec, "Positionals")) Spec.Positionals else PositionalOf(.{});
         const SpecCodec = if (@hasDecl(Spec, "Codec")) Spec.Codec else ArgCodec(Spec);
@@ -177,6 +178,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
 
             const allocator = self.arena.allocator();
             var positionalOf: PosOf = .{};
+            var forcePositionals = false;
 
             while (cursor.next()) |arg| {
                 if (comptime conf.withDiagnostics) {
@@ -189,6 +191,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                         positionalOf.parseNextType(allocator, cursor) catch |e| return .ErrOf(e, cursor);
                     } else break;
                 } else if (arg.len == 2 and std.mem.eql(u8, "--", arg)) {
+                    forcePositionals = true;
                     break;
                 } else if (arg.len >= 1 and arg[0] != '-') {
                     switch (self.parseVerb(arg, cursor)) {
@@ -220,8 +223,13 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
             self.positionals = positionalOf.collect(allocator) catch |e| return .ErrOf(e, cursor);
 
             if (comptime SpecTracker != void) {
-                if (cursor.peek() == null) self.tracker.cursorDone();
-                self.tracker.validate() catch |e| return .ErrOf(e, cursor);
+                self.tracker.validate(
+                    comptime VerbT != void,
+                    comptime PosOf.TupleT != void or PosOf.ReminderT != void,
+                    cursor,
+                    forcePositionals,
+                ) catch |e|
+                    return .ErrOf(e, cursor);
             }
 
             return null;
@@ -851,7 +859,7 @@ test "parse custom positionals" {
     try t.expectEqual({}, r1.positionals.reminder);
 
     try t.expectError(Spec.Positionals.CollectError.MissingPositionalField, tstParse(allocator, "program 2", Spec));
-    try t.expectError(@TypeOf(r1).Error.CursorNotDone, tstParse(allocator, "program 2 ab 3", Spec));
+    try t.expectError(@TypeOf(r1).Error.UnknownPositional, tstParse(allocator, "program 2 ab 3", Spec));
 
     const Spec2 = struct {
         pub const Positionals = PositionalOf(.{

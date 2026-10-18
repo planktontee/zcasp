@@ -1,5 +1,7 @@
 const std = @import("std");
 const argIter = @import("iterator.zig");
+const regent = @import("regent");
+const CursorT = regent.collections.Cursor([]const u8);
 
 pub fn FieldBitSet(Spec: type) type {
     const SpecEnumFields = std.meta.FieldEnum(Spec);
@@ -55,7 +57,6 @@ pub fn FieldBitSet(Spec: type) type {
 }
 
 test "track bits for field" {
-    const t = std.testing;
     const Spec = struct {
         a: i32,
         b: i32,
@@ -104,6 +105,10 @@ test "track bits for field" {
 }
 
 pub fn GroupMatchConfig(Spec: type, comptime extra: anytype) type {
+    const badFnMessage = std.fmt.comptimePrint(
+        "GroupMatch validateFn for {s} has to be void or fn (FieldBitSet(Spec)) returning void or !void, found {s}",
+        .{ @typeName(Spec), @typeName(@TypeOf(extra)) },
+    );
     const validateFn = switch (@typeInfo(@TypeOf(extra))) {
         .void => struct {
             pub fn validate(_: FieldBitSet(Spec)) void {
@@ -111,20 +116,22 @@ pub fn GroupMatchConfig(Spec: type, comptime extra: anytype) type {
             }
         }.validate,
         .@"fn" => extra,
-        else => @compileError("extra has to be void or an fn of type: fn (FieldBitSet(Spec)) anyerror!void, or void return"),
+        else => @compileError(badFnMessage),
     };
 
     const fnInfo = @typeInfo(@TypeOf(validateFn)).@"fn";
-    const R = @typeInfo(fnInfo.return_type.?);
-    std.debug.assert(R == .void or (R == .error_union and R.error_union.payload == void));
+    const R = @typeInfo(fnInfo.return_type orelse @compileError(badFnMessage));
+    if (R != .void and !(R == .error_union and R.error_union.payload == void))
+        @compileError(badFnMessage);
     const FnE = if (R == .void)
         error{}
     else
         R.error_union.error_set;
 
     const params = fnInfo.params;
-    std.debug.assert(params.len == 1);
-    std.debug.assert(params[0].type.? == FieldBitSet(Spec));
+    if (params.len != 1 or
+        params[0].type != FieldBitSet(Spec))
+        @compileError(badFnMessage);
 
     return struct {
         mandatoryVerb: bool = false,
@@ -143,6 +150,8 @@ pub fn GroupTracker(Spec: type) type {
 pub const TrackerError = error{
     MissingVerb,
     CursorNotDone,
+    UnknownVerb,
+    UnknownPositional,
 };
 
 pub fn GroupTrackerWithConfig(Spec: type, comptime config: anytype) type {
@@ -152,64 +161,107 @@ pub fn GroupTrackerWithConfig(Spec: type, comptime config: anytype) type {
         pub const ValidationError = TrackerError || @TypeOf(config).Error;
 
         fbset: FieldBitSet(Spec) = .{},
-        verb: bool = false,
-        cursorDoneFlag: bool = false,
+        verbParsed: bool = false,
 
         pub fn parsed(self: *@This(), comptime tag: SpecEnumFields) void {
             self.fbset.fieldSet(tag);
         }
 
         pub fn parsedVerb(self: *@This()) void {
-            self.verb = true;
-        }
-
-        pub fn cursorDone(self: *@This()) void {
-            self.cursorDoneFlag = true;
+            self.verbParsed = true;
         }
 
         pub fn checkVerb(self: *const @This()) TrackerError!void {
             if (comptime config.mandatoryVerb) {
-                if (!self.verb) return error.MissingVerb;
+                if (!self.verbParsed) return error.MissingVerb;
             }
         }
 
-        pub fn checkCursorDone(self: *const @This()) TrackerError!void {
-            if (comptime config.ensureCursorDone) {
-                if (!self.cursorDoneFlag) return error.CursorNotDone;
+        pub fn checkCursorDone(
+            self: *const @This(),
+            comptime hasVerbs: bool,
+            comptime hasPositionals: bool,
+            cursor: *CursorT,
+            forcePositionals: bool,
+        ) TrackerError!void {
+            if (comptime !config.ensureCursorDone) return;
+            const leftover = cursor.peek() orelse return;
+
+            const mustBePositional = !hasVerbs or
+                self.verbParsed or
+                forcePositionals or
+                std.mem.eql(u8, "-", leftover);
+            if (mustBePositional) {
+                try self.checkVerb();
+                return error.UnknownPositional;
             }
+
+            if (comptime config.mandatoryVerb or !hasPositionals) return error.UnknownVerb;
+            return error.CursorNotDone;
         }
 
-        pub fn validate(self: *const @This()) ValidationError!void {
+        pub fn validate(
+            self: *const @This(),
+            comptime hasVerbs: bool,
+            comptime hasPositionals: bool,
+            cursor: *CursorT,
+            forcePositionals: bool,
+        ) ValidationError!void {
             if (@typeInfo(@FieldType(@TypeOf(config), "validateFn")).@"fn".return_type.? == void)
                 config.validateFn(self.fbset)
             else
                 try config.validateFn(self.fbset);
+            try self.checkCursorDone(
+                hasVerbs,
+                hasPositionals,
+                cursor,
+                forcePositionals,
+            );
             try self.checkVerb();
-            try self.checkCursorDone();
         }
     };
 }
 
+const t = std.testing;
+
 test "check required fields" {
-    const t = std.testing;
     const Spec = struct {
         pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
             .mandatoryVerb = true,
         };
     };
+    const done = v: {
+        var dcur: regent.collections.DebugCursor = .{ .data = &.{} };
+        var cursor = dcur.asCursor();
+        break :v &cursor;
+    };
+    const pending = v: {
+        var dcur: regent.collections.DebugCursor = .{ .data = &.{"left"} };
+        var cursor = dcur.asCursor();
+        break :v &cursor;
+    };
+
+    const dash = v: {
+        var dcur: regent.collections.DebugCursor = .{ .data = &.{"-"} };
+        var cursor = dcur.asCursor();
+        break :v &cursor;
+    };
 
     var tracker = GroupTracker(Spec){};
 
-    try t.expectError(error.MissingVerb, tracker.validate());
+    try t.expectError(error.MissingVerb, tracker.validate(true, false, done, false));
     try t.expectError(error.MissingVerb, tracker.checkVerb());
+    try t.expectError(error.UnknownVerb, tracker.validate(true, false, pending, false));
+    try t.expectError(error.UnknownVerb, tracker.validate(true, true, pending, false));
+    try t.expectError(error.MissingVerb, tracker.validate(true, true, pending, true));
+    try t.expectError(error.MissingVerb, tracker.validate(true, false, dash, false));
     tracker.parsedVerb();
     try t.expectEqual({}, try tracker.checkVerb());
 
-    try t.expectError(error.CursorNotDone, tracker.validate());
-    try t.expectError(error.CursorNotDone, tracker.checkCursorDone());
-    tracker.cursorDone();
-    try t.expectEqual({}, try tracker.validate());
-    try t.expectEqual({}, try tracker.checkCursorDone());
+    try t.expectError(error.UnknownPositional, tracker.validate(true, false, pending, false));
+    try t.expectError(error.UnknownPositional, tracker.checkCursorDone(true, false, pending, false));
+    try t.expectEqual({}, try tracker.validate(true, false, done, false));
+    try t.expectEqual({}, try tracker.checkCursorDone(true, false, done, false));
 }
 
 fn hasError(comptime E: type, comptime name: []const u8) bool {
@@ -221,7 +273,6 @@ fn hasError(comptime E: type, comptime name: []const u8) bool {
 }
 
 test "untyped group match derives validateFn error set" {
-    const t = std.testing;
     const Spec = struct {
         a: ?u32 = null,
         b: ?u32 = null,
@@ -240,23 +291,50 @@ test "untyped group match derives validateFn error set" {
         std.debug.assert(hasError(Tracker.ValidationError, "NeedExactlyOneOfAB"));
         std.debug.assert(hasError(Tracker.ValidationError, "MissingVerb"));
         std.debug.assert(hasError(Tracker.ValidationError, "CursorNotDone"));
+        std.debug.assert(hasError(Tracker.ValidationError, "UnknownVerb"));
+        std.debug.assert(hasError(Tracker.ValidationError, "UnknownPositional"));
         std.debug.assert(!hasError(Tracker.ValidationError, "RequiredArgsMissing"));
     }
 
+    const done = v: {
+        var dcur: regent.collections.DebugCursor = .{ .data = &.{} };
+        var cursor = dcur.asCursor();
+        break :v &cursor;
+    };
+    const pending = v: {
+        var dcur: regent.collections.DebugCursor = .{ .data = &.{"left"} };
+        var cursor = dcur.asCursor();
+        break :v &cursor;
+    };
+
     var tracker = Tracker{};
-    try t.expectError(error.NeedExactlyOneOfAB, tracker.validate());
+    try t.expectError(error.NeedExactlyOneOfAB, tracker.validate(true, false, done, false));
     tracker.parsed(.a);
-    try t.expectError(error.MissingVerb, tracker.validate());
+    try t.expectError(error.MissingVerb, tracker.validate(true, false, done, false));
     tracker.parsedVerb();
-    try t.expectError(error.CursorNotDone, tracker.validate());
-    tracker.cursorDone();
-    try tracker.validate();
+    try t.expectError(error.UnknownPositional, tracker.validate(true, false, pending, false));
+    try tracker.validate(true, false, done, false);
     tracker.parsed(.b);
-    try t.expectError(error.NeedExactlyOneOfAB, tracker.validate());
+    try t.expectError(error.NeedExactlyOneOfAB, tracker.validate(true, false, done, false));
 }
 
 test "untyped group match defaults and void validateFn" {
-    const t = std.testing;
+    const done = v: {
+        var dcur: regent.collections.DebugCursor = .{ .data = &.{} };
+        var cursor = dcur.asCursor();
+        break :v &cursor;
+    };
+    const pending = v: {
+        var dcur: regent.collections.DebugCursor = .{ .data = &.{"left"} };
+        var cursor = dcur.asCursor();
+        break :v &cursor;
+    };
+    const dash = v: {
+        var dcur: regent.collections.DebugCursor = .{ .data = &.{"-"} };
+        var cursor = dcur.asCursor();
+        break :v &cursor;
+    };
+
     const NoFn = struct {
         pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
             .ensureCursorDone = false,
@@ -265,7 +343,7 @@ test "untyped group match defaults and void validateFn" {
     const NoFnTracker = GroupTracker(NoFn);
     comptime std.debug.assert(NoFnTracker.ValidationError == TrackerError);
     var noFn = NoFnTracker{};
-    try noFn.validate();
+    try noFn.validate(true, false, pending, false);
 
     const VoidFn = struct {
         x: u8 = 0,
@@ -275,9 +353,12 @@ test "untyped group match defaults and void validateFn" {
     const VoidTracker = GroupTracker(VoidFn);
     comptime std.debug.assert(VoidTracker.ValidationError == TrackerError);
     var voidFn = VoidTracker{};
-    try t.expectError(error.CursorNotDone, voidFn.validate());
-    voidFn.cursorDone();
-    try voidFn.validate();
+    try t.expectError(error.UnknownVerb, voidFn.validate(true, false, pending, false));
+    try t.expectError(error.CursorNotDone, voidFn.validate(true, true, pending, false));
+    try t.expectError(error.UnknownPositional, voidFn.validate(false, true, pending, false));
+    try t.expectError(error.UnknownPositional, voidFn.validate(true, true, pending, true));
+    try t.expectError(error.UnknownPositional, voidFn.validate(true, true, dash, false));
+    try voidFn.validate(true, true, done, false);
 }
 
 test "typed group match keeps validate.Error" {
