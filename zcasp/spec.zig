@@ -70,7 +70,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
             for (@typeInfo(SpecUnionVerbs()).@"union".fields) |field| {
                 errors = errors || field.type.Error;
             }
-            return errors;
+            return errors || error{VerbAlreadyParsed};
         }
 
         pub const Options = Spec;
@@ -244,6 +244,9 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
 
             inline for (@typeInfo(Spec.Verb).@"union".fields) |f| {
                 if (std.mem.eql(u8, f.name, arg)) {
+                    if (self.verb != null)
+                        return .{ .Err = .ErrOf(error.VerbAlreadyParsed, cursor) };
+
                     var verbR = SpecResponse(
                         f.type,
                         verbConf(),
@@ -930,6 +933,8 @@ test "parse custom positionals with verb" {
     const r3 = try tstParse(allocator, "program - 3", Spec);
     try t.expectEqualStrings("-", &r3.positionals.tuple.@"0");
     try t.expectEqual(null, r3.verb);
+
+    try t.expectError(error.VerbAlreadyParsed, tstParse(allocator, "program copy 2 copy", Spec));
 }
 
 test "parse verb" {
