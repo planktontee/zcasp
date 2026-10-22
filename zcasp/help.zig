@@ -75,16 +75,26 @@ fn appendPaddedLines(
     }
 }
 
+fn spacePadding(comptime len: usize) []const u8 {
+    return comptime &@as([len]u8, @splat(' '));
+}
+
 pub fn formatBlob(maxLineLen: usize, text: []const u8, delimiter: usize, indent: usize) []const u8 {
     return comptime rt: {
         var b = coll.ComptSb.init("");
-        const padding: [delimiter + indent]u8 = @splat(' ');
+        const padding = spacePadding(delimiter + indent);
         var iter = std.mem.splitScalar(u8, text, '\n');
         var first = true;
         while (iter.next()) |line| {
             if (!first) b.append("\n");
             first = false;
-            appendWrapped(b, maxLineLen, line, maxLineLen, &padding);
+            appendWrapped(
+                b,
+                maxLineLen,
+                line,
+                maxLineLen,
+                padding,
+            );
         }
         break :rt b.s;
     };
@@ -104,7 +114,7 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             Spec.GroupMatch.mandatoryVerb
         else
             false;
-        const INDENT: [conf.indent]u8 = @splat(' ');
+        const INDENT = spacePadding(conf.indent);
 
         fn appendEntry(
             comptime b: *coll.ComptSb,
@@ -204,7 +214,7 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                 if (enumFields.len == 0) break :rt null;
 
                 const columDelim = columnDelimiter(enumFields);
-                const padding: [conf.indent + columDelim]u8 = @splat(' ');
+                const padding = spacePadding(conf.indent + columDelim);
 
                 var b = coll.ComptSb.init("Commands:");
                 if (mandatoryVerb) b.append(" [Required]");
@@ -215,12 +225,12 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
 
                     if (verbShortDesc(f.name)) |verbDesc| {
                         line.appendAll(.{
-                            @as([columDelim - f.name.len]u8, @splat(' ')),
+                            spacePadding(columDelim - f.name.len),
                             verbDesc,
                         });
                     }
 
-                    appendEntry(b, line.s, conf.maxLineLen, &padding);
+                    appendEntry(b, line.s, conf.maxLineLen, padding);
                     if (i != enumFields.len - 1) b.append("\n");
                 }
 
@@ -352,7 +362,10 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                     defaultValue.?,
                     u8AsChar,
                 ),
-                .@"enum" => formatType(T) ++ "." ++ @tagName(defaultValue),
+                .@"enum" => if (conf.simpleTypes)
+                    @tagName(defaultValue)
+                else
+                    formatType(T) ++ "." ++ @tagName(defaultValue),
                 .@"struct" => formatStruct(T, defaultValue, u8AsChar),
                 .@"union" => switch (defaultValue) {
                     inline else => |e| coll.ComptSb.initTup(.{
@@ -428,7 +441,8 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                         Tt = opt.child;
                         continue :rfd @typeInfo(Tt);
                     },
-                    .@"struct", .@"union", .@"enum" => b.append(formatType(Tt)),
+                    .@"enum" => b.append("enum"),
+                    .@"struct", .@"union" => b.append(formatType(Tt)),
                     else => b.append(@typeName(Tt)),
                 }
                 break :rt b.s;
@@ -515,10 +529,20 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
 
                 const KV = struct { []const u8, usize };
 
+                var shortWidth: usize = 0;
+                for (fields) |field| {
+                    if (shorthand(OptShortFields, field)) |shand|
+                        shortWidth = @max(shortWidth, shand.len + 2);
+                }
+
                 var optionPieces: [fields.len][]const u8 = undefined;
                 for (fields, 0..) |field, i| {
                     var piece = coll.ComptSb.init("");
-                    if (shorthand(OptShortFields, field)) |shand| piece.appendAll(.{ shand, ", " });
+                    if (shorthand(OptShortFields, field)) |shand|
+                        // shorthands can be of len 1 or 2
+                        piece.appendAll(.{ shand, ",", spacePadding(shortWidth - shand.len - 1) })
+                    else
+                        piece.append(spacePadding(shortWidth));
 
                     piece.appendAll(.{ "--", field.name });
 
@@ -537,29 +561,29 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
 
                 var b = coll.ComptSb.initTup(.{ "Options:\n", conf.headerDelimiter });
                 const columDelim = columnDelimiter(optionPieces);
-                const padding: [conf.indent + columDelim]u8 = @splat(' ');
-                const innerBlock: [conf.indent * 2]u8 = @splat(' ');
+                const padding = spacePadding(conf.indent + columDelim);
+                const innerBlock = spacePadding(conf.indent * 2);
 
                 for (fields, &optionPieces, 0..) |field, optionPiece, i| {
                     defer if (i < fields.len - 1) b.append("\n");
                     const head = INDENT ++ optionPiece;
 
                     const optI = (if (Help.optionsDescription == null) null else optIdx.get(field.name)) orelse {
-                        appendEntry(b, head, conf.maxLineLen, &padding);
+                        appendEntry(b, head, conf.maxLineLen, padding);
                         continue;
                     };
                     const desc = Help.optionsDescription.?[optI];
 
                     if (desc.description) |vDesc| {
                         if (conf.optionsBreakline) {
-                            appendEntry(b, head, conf.maxLineLen, &padding);
+                            appendEntry(b, head, conf.maxLineLen, padding);
                             b.appendAll(.{ "\n", innerBlock });
-                            appendEntry(b, vDesc, conf.maxLineLen -| innerBlock.len, &innerBlock);
+                            appendEntry(b, vDesc, conf.maxLineLen -| innerBlock.len, innerBlock);
                         } else {
-                            const displacement: [columDelim - optionPiece.len]u8 = @splat(' ');
-                            appendEntry(b, head ++ displacement ++ vDesc, conf.maxLineLen, &padding);
+                            const displacement = spacePadding(columDelim - optionPiece.len);
+                            appendEntry(b, head ++ displacement ++ vDesc, conf.maxLineLen, padding);
                         }
-                    } else appendEntry(b, head, conf.maxLineLen, &padding);
+                    } else appendEntry(b, head, conf.maxLineLen, padding);
 
                     if (conf.optionsBreakline and i < fields.len - 1) b.append("\n");
                 }
@@ -626,7 +650,7 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                 if (PosT.TupleT == void and PosT.ReminderT == void) break :rt null;
 
                 var b = coll.ComptSb.initTup(.{ "Positionals:\n", conf.headerDelimiter });
-                const innerBlock: [conf.indent]u8 = @splat(' ');
+                const innerBlock = spacePadding(conf.indent);
 
                 var typesCount: usize = if (PosT.TupleT != void) std.meta.fields(PosT.TupleT).len else 0;
                 typesCount += if (PosT.ReminderT != void) 1 else 0;
@@ -643,7 +667,7 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                     typePieces[pieceIdx] = positionalPiece(PosT.ReminderT, reminderDesc());
                 }
                 const columDelim = columnDelimiter(typePieces);
-                const padding: [conf.indent + columDelim]u8 = @splat(' ');
+                const padding = spacePadding(conf.indent + columDelim);
 
                 if (PosT.TupleT != void) {
                     const fields = std.meta.fields(PosT.TupleT);
@@ -664,11 +688,8 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                             innerBlock,
                             typePiece,
                         });
-                        if (text) |s| line.appendAll(.{ &@as(
-                            [columDelim - typePiece.len]u8,
-                            @splat(' '),
-                        ), s });
-                        appendEntry(b, line.s, conf.maxLineLen, &padding);
+                        if (text) |s| line.appendAll(.{ spacePadding(columDelim - typePiece.len), s });
+                        appendEntry(b, line.s, conf.maxLineLen, padding);
                     }
                 }
 
@@ -680,11 +701,8 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                         rPiece,
                     });
 
-                    if (reminderDesc().description) |d| line.appendAll(.{ &@as(
-                        [columDelim - rPiece.len]u8,
-                        @splat(' '),
-                    ), d });
-                    appendEntry(b, line.s, conf.maxLineLen, &padding);
+                    if (reminderDesc().description) |d| line.appendAll(.{ spacePadding(columDelim - rPiece.len), d });
+                    appendEntry(b, line.s, conf.maxLineLen, padding);
                 }
 
                 break :rt b.s;
@@ -1035,9 +1053,9 @@ test "value refs" {
     try t.expectEqualStrings(
         \\Options:
         \\
-        \\  --file <path> ([]u8 = "-")      input
-        \\  -v, --delta <dx> <dy>           move by
-        \\  --verbose
+        \\      --file <path> ([]u8 = "-")      input
+        \\  -v, --delta <dx> <dy>               move by
+        \\      --verbose
     , HelpFmt(Spec, .{}).options().?);
     try t.expectEqualStrings(
         \\Positionals:
@@ -1114,7 +1132,7 @@ test "options basic" {
         \\Options:
         \\
         \\  -x, --posX (i32)        position X
-        \\  --posY (u17)            position Y
+        \\      --posY (u17)        position Y
     , HelpFmt(struct {
         posX: i32 = undefined,
         posY: u17 = undefined,
@@ -1127,6 +1145,17 @@ test "options basic" {
             },
         };
     }, .{}).options().?);
+    try t.expectEqualStrings(
+        \\Options:
+        \\  -x,  --posX
+        \\       --posY
+        \\  -pz, --posZ
+    , HelpFmt(struct {
+        posX: i32 = undefined,
+        posY: u17 = undefined,
+        posZ: i8 = undefined,
+        pub const Short = .{ .x = .posX, .pz = .posZ };
+    }, .{ .headerDelimiter = "" }).options().?);
     try t.expectEqualStrings(
         \\Options:
         \\  -x, --posX (u1 = 0)
@@ -1469,8 +1498,8 @@ test "options enum" {
 
     try t.expectEqualStrings(
         \\Options:
-        \\  --enumA (E = E.A)
-        \\  --enumB (E = E.B)
+        \\  --enumA (enum = A)
+        \\  --enumB (enum = B)
     , HelpFmt(struct {
         enumA: E = .A,
         enumB: E = .B,
