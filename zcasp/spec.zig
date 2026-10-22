@@ -2,6 +2,8 @@ const std = @import("std");
 const regent = @import("regent");
 const meta = regent.meta;
 const coll = regent.collections;
+const RotType = regent.ergo.RotType;
+const rotValue = regent.ergo.rotValue;
 const argIter = @import("iterator.zig");
 const argCodec = @import("codec.zig");
 const validate = @import("validate.zig");
@@ -25,7 +27,8 @@ pub const CursorT = coll.Cursor([]const u8);
 pub const SpecConfig = struct {
     withProgram: bool = true,
     withDiagnostics: bool = false,
-    helpConf: HelpConf = .{},
+    // null turns off help messages
+    helpConf: ?HelpConf = .{},
 };
 
 pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
@@ -34,10 +37,10 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
         arena: std.heap.ArenaAllocator,
         codec: SpecCodec,
         options: Options,
-        program: regent.ergo.RotType(conf.withProgram, []const u8),
+        program: RotType(conf.withProgram, []const u8),
         positionals: PosOf.Positionals,
         // TODO: support default verb
-        verb: regent.ergo.RotType(VerbT != void, ?VerbT),
+        verb: RotType(VerbT != void, ?VerbT),
         tracker: SpecTracker,
 
         fn verbConf() SpecConfig {
@@ -73,6 +76,9 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
             return errors || error{VerbAlreadyParsed};
         }
 
+        pub const helpMessage: RotType(conf.helpConf != null, []const u8) = if (conf.helpConf) |hConf|
+            HelpFmt(Spec, hConf).help()
+        else {};
         pub const Options = Spec;
         pub const VerbT = if (@hasDecl(Spec, "Verb")) SpecUnionVerbs() else void;
         const PosOf = if (@hasDecl(Spec, "Positionals")) Spec.Positionals else PositionalOf(.{});
@@ -105,25 +111,59 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
             break :E errors;
         };
 
+        fn retrieveDiagCursor(cursor: *CursorT) *coll.DiagnosticsCursor {
+            if (comptime conf.withDiagnostics) {
+                return @ptrCast(@alignCast(cursor.ptr));
+            }
+            unreachable;
+        }
+
+        fn resetDiagCursor(cursor: *CursorT) void {
+            if (comptime conf.withDiagnostics) {
+                const diag = retrieveDiagCursor(cursor);
+                diag.lastOpt = null;
+            }
+        }
+
+        fn setDiagLastOpt(cursor: *CursorT, lastOpt: ?[]const u8) void {
+            if (comptime conf.withDiagnostics) {
+                const diag = retrieveDiagCursor(cursor);
+                diag.lastOpt = lastOpt;
+            }
+        }
+
+        fn setDiagLastToken(cursor: *CursorT, lastToken: ?[]const u8) void {
+            if (comptime conf.withDiagnostics) {
+                const diag = retrieveDiagCursor(cursor);
+                diag.lastToken = lastToken;
+            }
+        }
+
+        fn retrieveDiagLastInfo(cursor: *CursorT) if (conf.withDiagnostics)
+            struct { ?[]const u8, ?[]const u8 }
+        else
+            struct { void, void } {
+            if (comptime conf.withDiagnostics) {
+                const diag = retrieveDiagCursor(cursor);
+                return .{ diag.lastOpt, diag.lastToken };
+            }
+            return .{ {}, {} };
+        }
+
         pub const ParseError = struct {
             err: Error,
-            message: ?[]const u8 = null,
-            // TODO: bitrot this?
+            message: RotType(conf.helpConf != null, []const u8),
             // TODO: test diag
-            lastToken: ?[]const u8 = null,
-            lastOpt: ?[]const u8 = null,
+            lastToken: RotType(conf.withDiagnostics, ?[]const u8) = rotValue(conf.withDiagnostics, null),
+            lastOpt: RotType(conf.withDiagnostics, ?[]const u8) = rotValue(conf.withDiagnostics, null),
 
             pub fn ErrOf(err: Error, cursor: *CursorT) @This() {
                 var self: @This() = .{
                     .err = err,
-                    .message = help(err),
+                    .message = helpMessage,
                 };
 
-                if (comptime conf.withDiagnostics) {
-                    const diag: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
-                    self.lastOpt = diag.lastOpt;
-                    self.lastToken = diag.lastToken;
-                }
+                self.lastOpt, self.lastToken = retrieveDiagLastInfo(cursor);
 
                 return self;
             }
@@ -161,6 +201,14 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
             return self.parseWithDiag(cursor);
         }
 
+        pub fn parseData(self: *@This(), data: []const []const u8) ?ParseError {
+            return self.parseWithDiag(cursor: {
+                var arCursor: coll.ArrayCursor([]const u8) = .{ .data = data };
+                var cursor = arCursor.asCursor();
+                break :cursor &cursor;
+            });
+        }
+
         fn parseWithDiag(self: *@This(), cursor: *CursorT) ?ParseError {
             if (comptime conf.withDiagnostics) {
                 var diag: coll.DiagnosticsCursor = .{
@@ -174,21 +222,21 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
 
         fn parseInner(self: *@This(), cursor: *CursorT) ?ParseError {
             if (comptime @FieldType(@This(), "program") != void)
-                self.program = cursor.next() orelse return .ErrOf(error.MissingProgram, cursor);
+                self.program = cursor.next() orelse
+                    return .ErrOf(error.MissingProgram, cursor);
 
             const allocator = self.arena.allocator();
             var positionalOf: PosOf = .{};
             var forcePositionals = false;
 
             while (cursor.next()) |arg| {
-                if (comptime conf.withDiagnostics) {
-                    const diag: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
-                    diag.lastOpt = null;
-                }
+                resetDiagCursor(cursor);
+
                 if (arg.len == 1 and arg[0] == '-') {
                     cursor.stackItem(arg);
                     if (positionalOf.hasNext()) {
-                        positionalOf.parseNextType(allocator, cursor) catch |e| return .ErrOf(e, cursor);
+                        positionalOf.parseNextType(allocator, cursor) catch |e|
+                            return .ErrOf(e, cursor);
                     } else break;
                 } else if (arg.len == 2 and std.mem.eql(u8, "--", arg)) {
                     forcePositionals = true;
@@ -199,7 +247,8 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                             if (!hasVerb) {
                                 cursor.stackItem(arg);
                                 if (positionalOf.hasNext()) {
-                                    positionalOf.parseNextType(allocator, cursor) catch |e| return .ErrOf(e, cursor);
+                                    positionalOf.parseNextType(allocator, cursor) catch |e|
+                                        return .ErrOf(e, cursor);
                                 } else break;
                             }
                             // NOTE: already parsed otherwise
@@ -212,15 +261,18 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                     @branchHint(.likely);
                     var offset: usize = 1;
                     if (arg[1] == '-') offset += 1;
-                    self.namedToken(offset, arg, cursor) catch |e| return .ErrOf(e, cursor);
+                    self.namedToken(offset, arg, cursor) catch |e|
+                        return .ErrOf(e, cursor);
                 }
             }
 
             while (cursor.peek() != null and positionalOf.hasNext()) {
-                positionalOf.parseNextType(allocator, cursor) catch |e| return .ErrOf(e, cursor);
+                positionalOf.parseNextType(allocator, cursor) catch |e|
+                    return .ErrOf(e, cursor);
             }
 
-            self.positionals = positionalOf.collect(allocator) catch |e| return .ErrOf(e, cursor);
+            self.positionals = positionalOf.collect(allocator) catch |e|
+                return .ErrOf(e, cursor);
 
             if (comptime SpecTracker != void) {
                 self.tracker.validate(
@@ -279,18 +331,13 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                 splitValue = slice[i + 1 ..];
                 cursor.stackItem(splitValue.?);
                 slice = slice[0..i];
-                if (comptime conf.withDiagnostics) {
-                    var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
-                    c.lastToken = splitValue.?;
-                }
+
+                setDiagLastToken(cursor, splitValue.?);
             }
 
             try switch (offset) {
                 2 => rv: {
-                    if (comptime conf.withDiagnostics) {
-                        var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
-                        c.lastOpt = slice;
-                    }
+                    setDiagLastOpt(cursor, slice);
 
                     inline for (std.meta.fields(Spec)) |field| {
                         if (std.mem.eql(u8, field.name, slice)) {
@@ -397,10 +444,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                     };
                     start += optShortArg.?.len;
 
-                    if (comptime conf.withDiagnostics) {
-                        var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
-                        c.lastOpt = lastArg.arg;
-                    }
+                    setDiagLastOpt(cursor, lastArg.arg);
 
                     if (lastArg.end != nextArg.start) unitCursor.stackItem(arg[lastArg.end..nextArg.start]);
                     try self.namedArg(
@@ -424,10 +468,8 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                     };
 
                     if (start > 0) {
-                        if (comptime conf.withDiagnostics) {
-                            var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
-                            c.lastOpt = lastArg.arg;
-                        }
+                        setDiagLastOpt(cursor, lastArg.arg);
+
                         if (lastArg.end != nextArg.start) unitCursor.stackItem(arg[lastArg.end..nextArg.start]);
                         try self.namedArg(
                             lastArg.arg,
@@ -446,10 +488,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
 
             // last lastArg set pass
             if (start > 0) {
-                if (comptime conf.withDiagnostics) {
-                    var c: *coll.DiagnosticsCursor = @ptrCast(@alignCast(cursor.ptr));
-                    c.lastOpt = lastArg.arg;
-                }
+                setDiagLastOpt(cursor, lastArg.arg);
 
                 var pickCursor = cursor;
                 if (lastArg.end != arg.len) {
@@ -497,10 +536,6 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
             };
             self.arena.deinit();
         }
-
-        pub fn help(e: Error) ?[]const u8 {
-            return HelpFmt(Spec, conf.helpConf).helpForErr(Error, e, "Failed with reason: ");
-        }
     };
 }
 
@@ -524,6 +559,12 @@ fn tstParse(allocator: Allocator, data: [:0]const u8, Spec: type) !SpecResponse(
     return try tstParseSpec(allocator, &cursor, Spec);
 }
 
+fn tstParseData(allocator: Allocator, data: []const []const u8, Spec: type) !SpecResponse(Spec, TestSpecConf) {
+    var response = SpecResponse(Spec, TestSpecConf).init(allocator);
+    if (response.parseData(data)) |err| return err.err;
+    return response;
+}
+
 test "empty args with default" {
     const base = t.allocator;
     var arena = std.heap.ArenaAllocator.init(base);
@@ -536,13 +577,11 @@ test "empty args with default" {
 
     try t.expectError(error.MissingProgram, tstParse(allocator, "", Args));
 
-    var tstCursor = try TstArgCursor.init(allocator, "");
-    var cursor = tstCursor.asCursor();
     var response = SpecResponse(Args, .{
         .withProgram = false,
         .withDiagnostics = true,
     }).init(allocator);
-    if (response.parse(&cursor)) |err|
+    if (response.parseData(&.{})) |err|
         return err.err;
 
     try t.expectEqual(false, response.options.flag);
@@ -1232,20 +1271,16 @@ test "parse struct options" {
         pub const Positionals = PositionalOf(.{ .ReminderType = []const []const u8 });
     };
 
-    var dcur: coll.DebugCursor = .{
-        .data = &.{
-            "program",
-            "--cfg",
-            "{\"name\": \"x\", \"verbose\": true, \"tags\": [\"a\", \"b c\"], \"origin\": {\"x\": -1, \"y\": 2}}",
-            "--points=[{\"x\": 1}, {\"x\": 2, \"y\": 3}]",
-            "--maybe",
-            "null",
-            "--flag",
-            "pos",
-        },
-    };
-    var c = dcur.asCursor();
-    const r1 = try tstParseSpec(allocator, &c, Spec);
+    const r1 = try tstParseData(allocator, &.{
+        "program",
+        "--cfg",
+        "{\"name\": \"x\", \"verbose\": true, \"tags\": [\"a\", \"b c\"], \"origin\": {\"x\": -1, \"y\": 2}}",
+        "--points=[{\"x\": 1}, {\"x\": 2, \"y\": 3}]",
+        "--maybe",
+        "null",
+        "--flag",
+        "pos",
+    }, Spec);
     try t.expectEqualStrings("x", r1.options.cfg.name);
     try t.expect(r1.options.cfg.verbose);
     const expectTags: []const []const u8 = &.{ "a", "b c" };
@@ -1263,23 +1298,17 @@ test "parse struct options" {
     const expectPos: []const []const u8 = &.{"pos"};
     try t.expectEqualDeep(expectPos, r1.positionals.reminder);
 
-    dcur = .{ .data = &.{ "program", "--points", "{x: 4}, {x: 5, y: 6}" } };
-    c = dcur.asCursor();
-    const rPhantom = try tstParseSpec(allocator, &c, Spec);
+    const rPhantom = try tstParseData(allocator, &.{ "program", "--points", "{x: 4}, {x: 5, y: 6}" }, Spec);
     try t.expectEqualDeep(@as([]const Spec.Point, &.{ .{ .x = 4 }, .{ .x = 5, .y = 6 } }), rPhantom.options.points);
 
-    dcur = .{ .data = &.{ "program", "-c", "{name: y}" } };
-    c = dcur.asCursor();
-    const r2 = try tstParseSpec(allocator, &c, Spec);
+    const r2 = try tstParseData(allocator, &.{ "program", "-c", "{name: y}" }, Spec);
     try t.expectEqualStrings("y", r2.options.cfg.name);
     try t.expect(!r2.options.cfg.verbose);
     try t.expectEqual(Spec.Point{ .x = 1 }, r2.options.maybe.?);
 
-    dcur = .{ .data = &.{ "program", "--cfg", "{name: y, nope: 1}" } };
-    c = dcur.asCursor();
     try t.expectError(
         error.UnknownStructField,
-        tstParseSpec(allocator, &c, Spec),
+        tstParseData(allocator, &.{ "program", "--cfg", "{name: y, nope: 1}" }, Spec),
     );
 }
 
@@ -1329,21 +1358,13 @@ test "parse struct options with custom codec" {
         };
     };
 
-    var dcur: coll.DebugCursor = .{
-        .data = &.{
-            "program",
-            "--p",
-            "{x: 2, y: 3, label: two}",
-            "--ps",
-            "[{x: 1}, {x: 5, y: -5}]",
-        },
-    };
-    var c = dcur.asCursor();
-    const r = try tstParseSpec(
-        allocator,
-        &c,
-        Spec,
-    );
+    const r = try tstParseData(allocator, &.{
+        "program",
+        "--p",
+        "{x: 2, y: 3, label: two}",
+        "--ps",
+        "[{x: 1}, {x: 5, y: -5}]",
+    }, Spec);
     try t.expectEqualDeep(
         Spec.Point{ .x = 4, .y = 6, .label = "two" },
         r.options.p,
@@ -1389,22 +1410,24 @@ test "untyped group match error set reaches spec" {
         tstParse(allocator, "program --a 1 --b 2", Spec),
     );
 
-    var dcur: coll.DebugCursor = .{ .data = &.{"program"} };
-    var c = dcur.asCursor();
     var res = SpecResponse(Spec, .{
         .helpConf = .{ .headerDelimiter = "" },
     }).init(t.allocator);
     defer res.deinit();
-    const err = res.parse(&c).?;
+    const err = res.parseData(&.{"program"}).?;
     try t.expectEqual(error.NeedExactlyOneOfAB, err.err);
     try t.expectEqualStrings(
-        \\Failed with reason: NeedExactlyOneOfAB
-        \\
         \\Options:
         \\  --a
         \\  --b
         \\
-    , err.message.?);
+    , err.message);
+
+    var noHelp = SpecResponse(Spec, .{ .helpConf = null }).init(t.allocator);
+    defer noHelp.deinit();
+    const noHelpErr = noHelp.parseData(&.{"program"}).?;
+    try t.expectEqual(error.NeedExactlyOneOfAB, noHelpErr.err);
+    try t.expectEqual(void, @TypeOf(noHelpErr.message));
 }
 
 test "validate require" {
@@ -1488,50 +1511,31 @@ test "help and inner help" {
         };
     };
 
-    var dcur: coll.DebugCursor = .{
-        .data = &.{
-            "program",
-        },
-    };
-    var c = dcur.asCursor();
-
     const Res = SpecResponse(Spec, .{ .withDiagnostics = true });
     var r = Res.init(t.allocator);
-    if (r.parse(&c)) |err| {
+    if (r.parseData(&.{"program"})) |err| {
         try t.expectEqualStrings(
-            \\Failed with reason: MissingVerb
-            \\
             \\  test
             \\
             \\Commands: [Required]
             \\
             \\  copy        copy test
             \\
-        , err.message.?);
+        , err.message);
     } else {
         unreachable;
     }
 
-    dcur = .{
-        .data = &.{
-            "program",
-            "copy",
-        },
-    };
-    c = dcur.asCursor();
-
     r = Res.init(t.allocator);
-    if (r.parse(&c)) |err| {
+    if (r.parseData(&.{ "program", "copy" })) |err| {
         try t.expectEqualStrings(
-            \\Failed with reason: RequiredArgsMissing
-            \\
             \\  copy test
             \\
             \\Options:
             \\
             \\  --path
             \\
-        , err.message.?);
+        , err.message);
     } else {
         unreachable;
     }

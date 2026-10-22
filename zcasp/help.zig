@@ -717,19 +717,6 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                 break :rt b.s;
             };
         }
-
-        pub fn helpForErr(ErrOf: type, E: ErrOf, comptime reason: []const u8) []const u8 {
-            return switch (E) {
-                inline else => |e| comptime rv: {
-                    break :rv coll.ComptSb.initTup(.{
-                        reason,
-                        @errorName(e),
-                        "\n\n",
-                        help(),
-                    }).s;
-                },
-            };
-        }
     };
 }
 
@@ -2196,20 +2183,4 @@ test "help" {
             .footer = "This is a footer, it gets added as typed",
         };
     }, .{ .simpleTypes = true }).help());
-}
-
-test "helpForErr" {
-    const t = std.testing;
-    const Spec = struct {
-        flag: bool,
-    };
-
-    try t.expectEqualStrings(
-        \\Error: Test
-        \\
-        \\Options:
-        \\
-        \\  --flag
-        \\
-    , HelpFmt(Spec, .{}).helpForErr(error{Test}, error{Test}.Test, "Error: "));
 }

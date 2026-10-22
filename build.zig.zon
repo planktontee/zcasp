@@ -2,12 +2,9 @@
     .name = .zcasp,
     .version = "0.0.1",
     .dependencies = .{
-        // .regent = .{
-        //     .path = "dependencies/regent",
-        // },
         .regent = .{
-            .url = "git+https://github.com/planktontee/regent.git#1aab71fdcc19ef9a460688ce2e84d604b3dcd8d4",
-            .hash = "regent-0.0.1-zgdbw-PdAgAu4reNVkkz45LotuFkJe0pL2wDi9RL_GuO",
+            .url = "git+https://github.com/planktontee/regent.git#781f9e6663ad2e494c0c11d42678a341cf2993fe",
+            .hash = "regent-0.0.1-zgdbw6HdAgCjTFxfZxLA2MomcUJKm6xwC4IWATNlXNFY",
         },
     },
     .minimum_zig_version = "0.16.0",
