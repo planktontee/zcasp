@@ -115,6 +115,10 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
         else
             false;
         const INDENT = spacePadding(conf.indent);
+        const OptShortFields: ?[]const btType.StructField = if (@hasDecl(Spec, "Short"))
+            std.meta.fields(@TypeOf(Spec.Short))
+        else
+            null;
 
         fn appendEntry(
             comptime b: *coll.ComptSb,
@@ -173,27 +177,56 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             };
         }
 
-        pub fn columnSize(comptime fields: anytype) usize {
+        pub fn columnSize(comptime lefts: []const []const u8) usize {
             return comptime rt: {
                 var size: usize = 0;
-                for (fields) |f| {
-                    const len = switch (@TypeOf(f)) {
-                        btType.EnumField, btType.StructField, btType.UnionField => f.name.len,
-                        []const u8, []u8 => f.len,
-                        else => @compileError("Unknow type to calculate displacement"),
-                    };
-                    size = @max(size, len);
-                }
+                for (lefts) |left| size = @max(size, left.len);
                 break :rt size;
             };
         }
 
-        pub fn columnDelimiter(comptime fields: anytype) usize {
+        pub fn columnDelimiter(comptime lefts: []const []const u8) usize {
             return comptime rt: {
-                var disp: usize = columnSize(fields) -| 1;
+                var disp: usize = columnSize(lefts) -| 1;
                 disp += conf.indent;
                 disp = ((disp / conf.columnSpace) + 2) * conf.columnSpace;
                 break :rt disp;
+            };
+        }
+
+        const Row = struct {
+            left: []const u8,
+            right: ?[]const u8 = null,
+        };
+
+        fn table(comptime header: []const u8, comptime rows: []const Row, comptime breakline: bool) []const u8 {
+            return comptime rt: {
+                var lefts: [rows.len][]const u8 = undefined;
+                for (rows, &lefts) |row, *left| left.* = row.left;
+                const columnDelim = columnDelimiter(&lefts);
+                const padding = spacePadding(conf.indent + columnDelim);
+                const blockIndent = spacePadding(conf.indent * 2);
+
+                var b = coll.ComptSb.initTup(.{ header, "\n", conf.headerDelimiter });
+                for (rows, 0..) |row, i| {
+                    if (i > 0) b.append(if (breakline) "\n\n" else "\n");
+                    const left = INDENT ++ row.left;
+                    const right = row.right orelse {
+                        appendEntry(b, left, conf.maxLineLen, padding);
+                        continue;
+                    };
+                    if (breakline) {
+                        appendEntry(b, left, conf.maxLineLen, padding);
+                        b.appendAll(.{ "\n", blockIndent });
+                        appendEntry(b, right, conf.maxLineLen -| blockIndent.len, blockIndent);
+                    } else appendEntry(
+                        b,
+                        left ++ spacePadding(columnDelim - row.left.len) ++ right,
+                        conf.maxLineLen,
+                        padding,
+                    );
+                }
+                break :rt b.s;
             };
         }
 
@@ -209,32 +242,18 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
         pub fn commands() ?[]const u8 {
             return comptime rt: {
                 if (Verb == void) break :rt null;
+                const fields = @typeInfo(@typeInfo(Verb).@"union".tag_type.?).@"enum".fields;
+                if (fields.len == 0) break :rt null;
 
-                const enumFields = @typeInfo(@typeInfo(Verb).@"union".tag_type.?).@"enum".fields;
-                if (enumFields.len == 0) break :rt null;
-
-                const columDelim = columnDelimiter(enumFields);
-                const padding = spacePadding(conf.indent + columDelim);
-
-                var b = coll.ComptSb.init("Commands:");
-                if (mandatoryVerb) b.append(" [Required]");
-
-                b.appendAll(.{ "\n", conf.headerDelimiter });
-                for (enumFields, 0..) |f, i| {
-                    var line = coll.ComptSb.initTup(.{ INDENT, f.name });
-
-                    if (verbShortDesc(f.name)) |verbDesc| {
-                        line.appendAll(.{
-                            spacePadding(columDelim - f.name.len),
-                            verbDesc,
-                        });
-                    }
-
-                    appendEntry(b, line.s, conf.maxLineLen, padding);
-                    if (i != enumFields.len - 1) b.append("\n");
-                }
-
-                break :rt b.s;
+                var rows: [fields.len]Row = undefined;
+                for (fields, &rows) |f, *row| row.* = .{
+                    .left = f.name,
+                    .right = verbShortDesc(f.name),
+                };
+                break :rt table(if (mandatoryVerb)
+                    "Commands: [Required]"
+                else
+                    "Commands:", &rows, false);
             };
         }
 
@@ -275,7 +294,11 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                         field.name,
                         if (conf.simpleTypes) "\"" else "",
                         if (conf.simpleTypes) ": " else " = ",
-                        formatDefaultValue(field.type, @field(defaultValue, field.name), u8AsChar),
+                        formatDefaultValue(
+                            field.type,
+                            @field(defaultValue, field.name),
+                            u8AsChar,
+                        ),
                     });
 
                     if (i < fields.len - 1) addComma = true;
@@ -478,42 +501,56 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                 zigTypeTranslation(T);
         }
 
-        fn optionRefs(comptime field: std.builtin.Type.StructField) ?[]const u8 {
+        fn fieldDesc(comptime name: []const u8) ?HelpData(Spec).FieldDesc {
             return comptime rt: {
-                const descriptions = Help.optionsDescription orelse break :rt null;
-                for (descriptions) |desc| {
-                    if (!std.mem.eql(u8, @tagName(desc.field), field.name)) continue;
-                    const refs = desc.refs orelse break :rt null;
-                    if (refs.len == 0) break :rt null;
-                    break :rt valueRefs(refs);
+                for (Help.optionsDescription orelse &.{}) |desc| {
+                    if (std.mem.eql(u8, @tagName(desc.field), name)) break :rt desc;
                 }
                 break :rt null;
             };
         }
 
-        pub fn typeHint(
-            comptime field: std.builtin.Type.StructField,
+        fn typeHint(
+            comptime field: btType.StructField,
+            comptime desc: HelpData(Spec).FieldDesc,
         ) ?[]const u8 {
             return comptime rt: {
-                const descriptions = Help.optionsDescription orelse break :rt null;
-                for (descriptions) |desc| {
-                    if (!std.mem.eql(u8, @tagName(desc.field), field.name)) continue;
-                    if (!desc.typeHint and !desc.defaultHint) break :rt null;
+                if (!desc.typeHint and !desc.defaultHint) break :rt null;
 
-                    var b = coll.ComptSb.init("(");
-                    if (desc.typeHint) b.append(translateType(field.type, desc.u8AsChar));
+                var b = coll.ComptSb.init("(");
+                if (desc.typeHint) b.append(translateType(field.type, desc.u8AsChar));
 
-                    if (desc.typeHint and desc.defaultHint and !meta.isUndefined(field)) {
-                        b.append(" = ");
-                    }
-
-                    if (desc.defaultHint and !meta.isUndefined(field)) {
-                        b.append(formatDefaultValue(field.type, field.defaultValue().?, desc.u8AsChar));
-                    }
-                    b.append(")");
-                    break :rt b.s;
+                if (desc.typeHint and desc.defaultHint and !meta.isUndefined(field)) {
+                    b.append(" = ");
                 }
-                break :rt null;
+
+                if (desc.defaultHint and !meta.isUndefined(field)) {
+                    b.append(formatDefaultValue(field.type, field.defaultValue().?, desc.u8AsChar));
+                }
+                b.append(")");
+                break :rt b.s;
+            };
+        }
+
+        fn optionPiece(
+            comptime field: btType.StructField,
+            comptime desc: ?HelpData(Spec).FieldDesc,
+            comptime shortWidth: usize,
+        ) []const u8 {
+            return comptime rt: {
+                var piece = coll.ComptSb.init("");
+                if (shorthand(OptShortFields, field)) |shand|
+                    // shorthands can be of len 1 or 2
+                    piece.appendAll(.{ shand, ",", spacePadding(shortWidth - shand.len - 1) })
+                else
+                    piece.append(spacePadding(shortWidth));
+
+                piece.appendAll(.{ "--", field.name });
+
+                const d = desc orelse break :rt piece.s;
+                if (d.refs) |refs| if (refs.len > 0) piece.appendAll(.{ " ", valueRefs(refs) });
+                if (typeHint(field, d)) |hint| piece.appendAll(.{ " ", hint });
+                break :rt piece.s;
             };
         }
 
@@ -522,12 +559,6 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
             return comptime rt: {
                 const fields = std.meta.fields(Spec);
                 if (fields.len == 0) break :rt null;
-                const OptShortFields: ?[]const btType.StructField = if (@hasDecl(Spec, "Short"))
-                    std.meta.fields(@TypeOf(Spec.Short))
-                else
-                    null;
-
-                const KV = struct { []const u8, usize };
 
                 var shortWidth: usize = 0;
                 for (fields) |field| {
@@ -535,59 +566,15 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                         shortWidth = @max(shortWidth, shand.len + 2);
                 }
 
-                var optionPieces: [fields.len][]const u8 = undefined;
-                for (fields, 0..) |field, i| {
-                    var piece = coll.ComptSb.init("");
-                    if (shorthand(OptShortFields, field)) |shand|
-                        // shorthands can be of len 1 or 2
-                        piece.appendAll(.{ shand, ",", spacePadding(shortWidth - shand.len - 1) })
-                    else
-                        piece.append(spacePadding(shortWidth));
-
-                    piece.appendAll(.{ "--", field.name });
-
-                    if (optionRefs(field)) |refs| piece.appendAll(.{ " ", refs });
-                    if (typeHint(field)) |tpHint| piece.appendAll(.{ " ", tpHint });
-
-                    optionPieces[i] = piece.s;
-                }
-
-                const optsSize = if (Help.optionsDescription) |descriptions| descriptions.len else 0;
-                var optsIndxKv: [optsSize]KV = undefined;
-                if (Help.optionsDescription) |descriptions| for (descriptions, 0..) |desc, i| {
-                    optsIndxKv[i] = .{ @tagName(desc.field), i };
-                };
-                const optIdx = std.static_string_map.StaticStringMap(usize).initComptime(optsIndxKv);
-
-                var b = coll.ComptSb.initTup(.{ "Options:\n", conf.headerDelimiter });
-                const columDelim = columnDelimiter(optionPieces);
-                const padding = spacePadding(conf.indent + columDelim);
-                const innerBlock = spacePadding(conf.indent * 2);
-
-                for (fields, &optionPieces, 0..) |field, optionPiece, i| {
-                    defer if (i < fields.len - 1) b.append("\n");
-                    const head = INDENT ++ optionPiece;
-
-                    const optI = (if (Help.optionsDescription == null) null else optIdx.get(field.name)) orelse {
-                        appendEntry(b, head, conf.maxLineLen, padding);
-                        continue;
+                var rows: [fields.len]Row = undefined;
+                for (fields, &rows) |field, *row| {
+                    const desc = fieldDesc(field.name);
+                    row.* = .{
+                        .left = optionPiece(field, desc, shortWidth),
+                        .right = if (desc) |d| d.description else null,
                     };
-                    const desc = Help.optionsDescription.?[optI];
-
-                    if (desc.description) |vDesc| {
-                        if (conf.optionsBreakline) {
-                            appendEntry(b, head, conf.maxLineLen, padding);
-                            b.appendAll(.{ "\n", innerBlock });
-                            appendEntry(b, vDesc, conf.maxLineLen -| innerBlock.len, innerBlock);
-                        } else {
-                            const displacement = spacePadding(columDelim - optionPiece.len);
-                            appendEntry(b, head ++ displacement ++ vDesc, conf.maxLineLen, padding);
-                        }
-                    } else appendEntry(b, head, conf.maxLineLen, padding);
-
-                    if (conf.optionsBreakline and i < fields.len - 1) b.append("\n");
                 }
-                break :rt b.s;
+                break :rt table("Options:", &rows, conf.optionsBreakline);
             };
         }
 
@@ -647,65 +634,31 @@ pub fn HelpFmt(comptime Spec: type, comptime conf: HelpConf) type {
                 if (Help.positionalsDescription == null) break :rt null;
 
                 const PosT = if (@hasDecl(Spec, "Positionals")) Spec.Positionals else DefaultPosT;
-                if (PosT.TupleT == void and PosT.ReminderT == void) break :rt null;
+                const tupleFields: []const btType.StructField = if (PosT.TupleT != void)
+                    std.meta.fields(PosT.TupleT)
+                else
+                    &.{};
+                const hasReminder = PosT.ReminderT != void;
+                if (tupleFields.len == 0 and !hasReminder) break :rt null;
 
-                var b = coll.ComptSb.initTup(.{ "Positionals:\n", conf.headerDelimiter });
-                const innerBlock = spacePadding(conf.indent);
-
-                var typesCount: usize = if (PosT.TupleT != void) std.meta.fields(PosT.TupleT).len else 0;
-                typesCount += if (PosT.ReminderT != void) 1 else 0;
-
-                var typePieces: [typesCount][]const u8 = undefined;
-                var pieceIdx: usize = 0;
-                if (PosT.TupleT != void) {
-                    for (std.meta.fields(PosT.TupleT)) |field| {
-                        typePieces[pieceIdx] = positionalPiece(field.type, tupleDesc(field.name));
-                        pieceIdx += 1;
-                    }
-                }
-                if (PosT.ReminderT != void) {
-                    typePieces[pieceIdx] = positionalPiece(PosT.ReminderT, reminderDesc());
-                }
-                const columDelim = columnDelimiter(typePieces);
-                const padding = spacePadding(conf.indent + columDelim);
-
-                if (PosT.TupleT != void) {
-                    const fields = std.meta.fields(PosT.TupleT);
-                    for (fields, 0..) |field, tupIdx| {
-                        defer if (tupIdx < fields.len - 1) b.append("\n");
-
-                        const tupItemDesc = tupleDesc(field.name).description;
-
-                        const typePiece = typePieces[tupIdx];
-                        const text: ?[]const u8 = if (@typeInfo(fields[tupIdx].type) == .optional)
-                            tupItemDesc
-                        else if (tupItemDesc) |desc|
-                            "[Required] " ++ desc
+                var rows: [tupleFields.len + @intFromBool(hasReminder)]Row = undefined;
+                for (tupleFields, rows[0..tupleFields.len]) |field, *row| {
+                    const desc = tupleDesc(field.name);
+                    row.* = .{
+                        .left = positionalPiece(field.type, desc),
+                        .right = if (@typeInfo(field.type) == .optional)
+                            desc.description
+                        else if (desc.description) |d|
+                            "[Required] " ++ d
                         else
-                            "[Required]";
-
-                        var line = coll.ComptSb.initTup(.{
-                            innerBlock,
-                            typePiece,
-                        });
-                        if (text) |s| line.appendAll(.{ spacePadding(columDelim - typePiece.len), s });
-                        appendEntry(b, line.s, conf.maxLineLen, padding);
-                    }
+                            "[Required]",
+                    };
                 }
-
-                if (PosT.ReminderT != void) {
-                    if (PosT.TupleT != void) b.append("\n");
-                    const rPiece = typePieces[typePieces.len - 1];
-                    var line = coll.ComptSb.initTup(.{
-                        innerBlock,
-                        rPiece,
-                    });
-
-                    if (reminderDesc().description) |d| line.appendAll(.{ spacePadding(columDelim - rPiece.len), d });
-                    appendEntry(b, line.s, conf.maxLineLen, padding);
-                }
-
-                break :rt b.s;
+                if (hasReminder) rows[rows.len - 1] = .{
+                    .left = positionalPiece(PosT.ReminderT, reminderDesc()),
+                    .right = reminderDesc().description,
+                };
+                break :rt table("Positionals:", &rows, false);
             };
         }
 
