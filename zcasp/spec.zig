@@ -303,7 +303,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                     var verbR = SpecResponse(
                         f.type,
                         verbConf(),
-                    ).init(self.arena.child_allocator);
+                    ).init(self.arena.allocator());
                     if (verbR.parseInner(cursor)) |e| {
                         return .{
                             .Err = .{
@@ -533,9 +533,6 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
         }
 
         pub fn deinit(self: *const @This()) void {
-            if (comptime VerbT != void) if (self.verb) |hasVerb| switch (hasVerb) {
-                inline else => |v| v.deinit(),
-            };
             self.arena.deinit();
         }
     };
@@ -1484,6 +1481,10 @@ test "parsed spec cleanup with verb" {
 
     const r1 = try tstParseSpec(allocator, &cursor, Spec);
     defer r1.deinit();
+
+    var r2 = SpecResponse(Spec, TestSpecConf).init(allocator);
+    defer r2.deinit();
+    try t.expect(r2.parseData(&.{ "program", "--verbose", "copy", "--src", "file1", "--bad" }) != null);
 }
 
 test "help and inner help" {
