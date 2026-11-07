@@ -156,6 +156,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
             // TODO: test diag
             lastToken: RotType(conf.withDiagnostics, ?[]const u8) = rotValue(conf.withDiagnostics, null),
             lastOpt: RotType(conf.withDiagnostics, ?[]const u8) = rotValue(conf.withDiagnostics, null),
+            verb: RotType(conf.withDiagnostics, ?[]const u8) = rotValue(conf.withDiagnostics, null),
 
             pub fn ErrOf(err: Error, cursor: *CursorT) @This() {
                 var self: @This() = .{
@@ -310,6 +311,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
                                 .message = e.message,
                                 .lastOpt = e.lastOpt,
                                 .lastToken = e.lastToken,
+                                .verb = if (comptime conf.withDiagnostics) e.verb orelse f.name else {},
                             },
                         };
                     } else {
@@ -1539,4 +1541,41 @@ test "help and inner help" {
     } else {
         unreachable;
     }
+}
+
+test "diagnostics innermost verb" {
+    const Spec = struct {
+        verbose: bool = false,
+
+        pub const Remote = struct {
+            pub const Add = struct {
+                port: u16 = 0,
+            };
+            pub const Verb = union(enum) { add: Add };
+        };
+        pub const Verb = union(enum) { remote: Remote };
+
+        pub fn check(set: validate.FieldBitSet(@This())) !void {
+            if (set.isFieldMissing(.verbose)) return error.VerboseMissing;
+        }
+        pub const GroupMatch: GroupMatchConfig(@This(), @This().check) = .{};
+    };
+    const Res = SpecResponse(Spec, .{ .withDiagnostics = true, .helpConf = null });
+
+    const cases: []const struct { []const []const u8, Res.Error, ?[]const u8 } = &.{
+        .{ &.{ "program", "--bad" }, error.UnknownArgumentName, null },
+        .{ &.{ "program", "--verbose", "remote", "--bad" }, error.UnknownArgumentName, "remote" },
+        .{ &.{ "program", "--verbose", "remote", "add", "--port", "abc" }, error.InvalidCharacter, "add" },
+        .{ &.{ "program", "remote", "add", "--port", "1" }, error.VerboseMissing, null },
+    };
+    for (cases) |case| {
+        const args, const expectErr, const expectVerb = case;
+        var r = Res.init(t.allocator);
+        defer r.deinit();
+        const err = r.parseData(args) orelse return error.TestExpectedError;
+        try t.expectEqual(expectErr, err.err);
+        try t.expectEqualDeep(expectVerb, err.verb);
+    }
+
+    try t.expectEqual(void, @FieldType(SpecResponse(Spec, .{}).ParseError, "verb"));
 }
