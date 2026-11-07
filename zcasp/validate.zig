@@ -190,7 +190,7 @@ pub fn GroupTrackerWithConfig(Spec: type, comptime config: anytype) type {
             const mustBePositional = !hasVerbs or
                 self.verbParsed or
                 forcePositionals or
-                std.mem.eql(u8, "-", leftover);
+                std.mem.startsWith(u8, leftover, "-");
             if (mustBePositional) {
                 try self.checkVerb();
                 return error.UnknownPositional;
@@ -334,6 +334,11 @@ test "untyped group match defaults and void validateFn" {
         var cursor = dcur.asCursor();
         break :v &cursor;
     };
+    const negative = v: {
+        var dcur: regent.collections.DebugCursor = .{ .data = &.{"-5"} };
+        var cursor = dcur.asCursor();
+        break :v &cursor;
+    };
 
     const NoFn = struct {
         pub const GroupMatch: GroupMatchConfig(@This(), {}) = .{
@@ -358,6 +363,7 @@ test "untyped group match defaults and void validateFn" {
     try t.expectError(error.UnknownPositional, voidFn.validate(false, true, pending, false));
     try t.expectError(error.UnknownPositional, voidFn.validate(true, true, pending, true));
     try t.expectError(error.UnknownPositional, voidFn.validate(true, true, dash, false));
+    try t.expectError(error.UnknownPositional, voidFn.validate(true, true, negative, false));
     try voidFn.validate(true, true, done, false);
 }
 

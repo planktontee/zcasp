@@ -233,7 +233,7 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
             while (cursor.next()) |arg| {
                 resetDiagCursor(cursor);
 
-                if (arg.len == 1 and arg[0] == '-') {
+                if (isDashPositional(arg)) {
                     cursor.stackItem(arg);
                     if (positionalOf.hasNext()) {
                         positionalOf.parseNextType(allocator, cursor) catch |e|
@@ -382,6 +382,20 @@ pub fn SpecResponse(comptime Spec: type, comptime conf: SpecConfig) type {
             }
 
             return null;
+        }
+
+        fn isDashPositional(arg: []const u8) bool {
+            if (arg.len == 0 or arg[0] != '-') return false;
+            if (arg.len == 1) return true;
+            return std.ascii.isDigit(arg[1]) and !startsWithShort(arg[1..]);
+        }
+
+        fn startsWithShort(short: []const u8) bool {
+            if (comptime !@hasDecl(Spec, "Short")) return false;
+            return if (short.len >= 2)
+                matchShortArg(short, 0) != null
+            else
+                std.meta.stringToEnum(ShortEnum, short) != null;
         }
 
         fn translateShortArg(arg: []const u8) Error![]const u8 {
@@ -973,6 +987,53 @@ test "parse custom positionals with verb" {
     try t.expectEqual(null, r3.verb);
 
     try t.expectError(error.VerbAlreadyParsed, tstParse(allocator, "program copy 2 copy", Spec));
+}
+
+test "parse negative number positionals" {
+    const base = t.allocator;
+    var arena = std.heap.ArenaAllocator.init(base);
+    defer arena.deinit();
+    const allocator = arena.allocator();
+
+    const Spec = struct {
+        n: i32 = 0,
+        x: bool = false,
+        pub const Short = .{ .x = .x, .n = .n };
+        pub const Positionals = PositionalOf(.{
+            .TupleType = struct { i32, f32, f32 },
+            .ReminderType = void,
+        });
+    };
+    const r1 = try tstParse(allocator, "program -1920 -x -0.5 -1e3 -n -40", Spec);
+    try t.expectEqual(-1920, r1.positionals.tuple.@"0");
+    try t.expectEqual(-0.5, r1.positionals.tuple.@"1");
+    try t.expectEqual(-1000, r1.positionals.tuple.@"2");
+    try t.expect(r1.options.x);
+    try t.expectEqual(-40, r1.options.n);
+    try t.expectEqual(-40, (try tstParse(allocator, "program -xn-40 1 2 3", Spec)).options.n);
+    try t.expectError(error.InvalidCharacter, tstParse(allocator, "program -1x 1 1", Spec));
+    try t.expectError(error.UnknownShorthandName, tstParse(allocator, "program -.5 1 1", Spec));
+    try t.expectError(error.UnknownPositional, tstParse(allocator, "program 1 2 3 -4", Spec));
+
+    const DigitShort = struct {
+        one: bool = false,
+        pub const Short = .{ .@"1" = .one };
+        pub const Positionals = PositionalOf(.{ .TupleType = struct { i32 }, .ReminderType = void });
+    };
+    const r2 = try tstParse(allocator, "program -1 -25", DigitShort);
+    try t.expect(r2.options.one);
+    try t.expectEqual(-25, r2.positionals.tuple.@"0");
+
+    const WithVerb = struct {
+        pub const Resize = struct {
+            pub const Positionals = PositionalOf(.{ .TupleType = struct { i32 }, .ReminderType = void });
+        };
+        pub const Verb = union(enum) { resize: Resize };
+        pub const Positionals = PositionalOf(.{ .TupleType = struct { ?i32 }, .ReminderType = void });
+    };
+    const r3 = try tstParse(allocator, "program resize -100", WithVerb);
+    try t.expectEqual(-100, r3.verb.?.resize.positionals.tuple.@"0");
+    try t.expectError(error.UnknownPositional, tstParse(allocator, "program 1 -5", WithVerb));
 }
 
 test "parse verb" {
