@@ -114,8 +114,36 @@ pub const PrimitiveCodec = struct {
             .optional => @This().parseOpt(codec, T, tag, allocator, cursor),
             .@"struct" => |st| if (comptime st.is_tuple)
                 @This().parseTuple(codec, T, tag, allocator, cursor)
-            else
-                @This().parseStruct(codec, T, tag, allocator, cursor),
+            else v: {
+                const hasParseFn: bool = @hasDecl(T, "parse") and b: {
+                    const parseFnTag = @typeInfo(@TypeOf(T.parse));
+                    if (parseFnTag != .@"fn")
+                        break :b false;
+
+                    const parseFnInfo = parseFnTag.@"fn";
+                    if (parseFnInfo.params.len != 4)
+                        break :b false;
+
+                    if (parseFnInfo.params[3].type != *CursorT)
+                        break :b false;
+
+                    if (parseFnInfo.params[2].type != Allocator)
+                        break :b false;
+
+                    break :b true;
+                };
+
+                break :v if (hasParseFn)
+                    T.parse(codec, tag, allocator, cursor)
+                else
+                    @This().parseStruct(
+                        codec,
+                        T,
+                        tag,
+                        allocator,
+                        cursor,
+                    );
+            },
             else => @compileError(unsupportedMessage),
         };
     }
@@ -979,6 +1007,24 @@ test "codec parseStruct" {
     var emptyCursor = empty.asCursor();
     var codec = ArgCodec(struct { v: Point }){};
     try t.expectError(C.Error.ParseStructEndOfIterator, codec.parseByTag(.v, allocator, &emptyCursor));
+}
+
+test "codec parse fn on struct" {
+    const allocator = t.allocator;
+    const Temp = struct {
+        c: i32,
+
+        pub fn parse(_: anytype, comptime _: anytype, _: Allocator, cursor: *PrimitiveCodec.CursorT) PrimitiveCodec.Error!@This() {
+            const token = cursor.next() orelse return error.ParseStructEndOfIterator;
+            if (!std.mem.endsWith(u8, token, "C")) return error.InvalidCharacter;
+            return .{ .c = try std.fmt.parseInt(i32, token[0 .. token.len - 1], 10) };
+        }
+    };
+
+    try t.expectEqual(Temp{ .c = -4 }, try tstParseArg(Temp, allocator, "-4C"));
+    try t.expectEqual(21, (try tstParseArg(struct { t: Temp }, allocator, "{t: 21C}")).t.c);
+    try t.expectEqual([2]Temp{ .{ .c = 1 }, .{ .c = 2 } }, try tstParseArg([2]Temp, allocator, "[1C, 2C]"));
+    try t.expectError(error.InvalidCharacter, tstParseArg(Temp, allocator, "{c: 1}"));
 }
 
 test "parse tuple" {
